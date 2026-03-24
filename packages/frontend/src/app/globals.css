@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --gold: #F5C518;
+  --black: #0a0a0a;
+  --dark: #1a1a1a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--black);
+  color: white;
+  font-family: system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+::-webkit-scrollbar-thumb {
+  background: #F5C518;
+  border-radius: 3px;
+}
+
+/* Selection */
+::selection {
+  background: rgba(245, 197, 24, 0.3);
+  color: white;
+}
+
+@layer components {
+  .btn-gold {
+    @apply bg-gold text-dark-300 font-bold px-6 py-3 rounded-lg
+           hover:bg-gold-400 active:bg-gold-600
+           transition-all duration-200
+           shadow-gold hover:shadow-gold-lg
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-outline-gold {
+    @apply border-2 border-gold text-gold font-bold px-6 py-3 rounded-lg
+           hover:bg-gold hover:text-dark-300
+           transition-all duration-200;
+  }
+
+  .btn-dark {
+    @apply bg-dark-50 text-white font-semibold px-6 py-3 rounded-lg
+           hover:bg-dark-100 border border-white/10
+           transition-all duration-200;
+  }
+
+  .card {
+    @apply bg-dark-50 border border-white/10 rounded-xl p-6
+           shadow-dark;
+  }
+
+  .card-gold {
+    @apply bg-dark-50 border border-gold/30 rounded-xl p-6
+           shadow-gold;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold;
+  }
+
+  .badge-gold {
+    @apply badge bg-gold/20 text-gold border border-gold/30;
+  }
+
+  .badge-dark {
+    @apply badge bg-white/10 text-white/70;
+  }
+
+  .stat-block {
+    @apply flex flex-col gap-1;
+  }
+
+  .stat-label {
+    @apply text-xs text-white/50 uppercase tracking-wider font-semibold;
+  }
+
+  .stat-value {
+    @apply text-2xl font-bold text-gold;
+  }
+
+  .input-dark {
+    @apply w-full bg-dark-100 border border-white/20 rounded-lg px-4 py-3
+           text-white placeholder-white/30
+           focus:outline-none focus:border-gold focus:ring-1 focus:ring-gold
+           transition-all duration-200;
+  }
+
+  .ai-message {
+    @apply bg-gold/10 border-l-4 border-gold rounded-r-xl p-4
+           text-white/90 italic;
+  }
+
+  .chat-bubble-user {
+    @apply bg-dark-50 border border-white/10 rounded-2xl rounded-tl-sm px-4 py-3;
+  }
+
+  .chat-bubble-ai {
+    @apply bg-gold/10 border border-gold/20 rounded-2xl rounded-tl-sm px-4 py-3;
+  }
+}
