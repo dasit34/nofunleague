@@ -123,6 +123,27 @@ router.post('/logout', authenticate, (_req: AuthRequest, res: Response) => {
   res.json({ message: 'Logged out successfully' });
 });
 
+// GET /api/users/me/stats — dashboard summary for the current user
+router.get('/me/stats', authenticate, async (req: AuthRequest, res: Response) => {
+  const { rows: [stats] } = await query(
+    `SELECT
+       COUNT(DISTINCT l.id)::int                           AS leagues_count,
+       COALESCE(SUM(t.wins),   0)::int                    AS total_wins,
+       COALESCE(SUM(t.losses), 0)::int                    AS total_losses,
+       COALESCE(SUM(t.ties),   0)::int                    AS total_ties,
+       COALESCE(SUM(t.points_for), 0)::float              AS total_points_for,
+       (SELECT COUNT(*)::int
+        FROM trades tr
+        JOIN teams tr_team ON tr_team.id = tr.receiving_team_id
+        WHERE tr_team.user_id = $1
+          AND tr.status = 'pending')                       AS pending_trades
+     FROM leagues l
+     JOIN teams t ON t.league_id = l.id AND t.user_id = $1`,
+    [req.user!.id]
+  );
+  res.json(stats);
+});
+
 // GET /api/users/me — full profile for the authenticated user
 router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   const { rows } = await query(

@@ -71,6 +71,15 @@ export const auth = {
 
   me: () => request<User>('/api/users/me'),
 
+  stats: () => request<{
+    leagues_count: number;
+    total_wins: number;
+    total_losses: number;
+    total_ties: number;
+    total_points_for: number;
+    pending_trades: number;
+  }>('/api/users/me/stats'),
+
   updateProfile: (data: {
     display_name?: string;
     avatar_url?: string | null;
@@ -99,13 +108,17 @@ export const leagues = {
   get: (id: string) => request<unknown>(`/api/leagues/${id}`),
 
   syncSleeper: (id: string) =>
-    request<unknown>(`/api/leagues/${id}/sync-sleeper`, { method: 'POST' }),
+    request<{ message: string; week: number; scoring_format: string; synced_rosters: number; linked_users: number }>(
+      `/api/leagues/${id}/sync-sleeper`, { method: 'POST' }),
+
+  update: (id: string, data: { week?: number; status?: string }) =>
+    request<unknown>(`/api/leagues/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 
   getMatchups: (id: string, week: number) =>
     request<unknown[]>(`/api/leagues/${id}/matchups/${week}`),
 
   importMatchups: (id: string, week: number) =>
-    request<unknown>(`/api/leagues/${id}/import-matchups/${week}`, { method: 'POST' }),
+    request<{ message: string; imported: number }>(`/api/leagues/${id}/import-matchups/${week}`, { method: 'POST' }),
 };
 
 // =============================================
@@ -115,6 +128,11 @@ export const teams = {
   get: (id: string) => request<unknown>(`/api/teams/${id}`),
   scores: (id: string) => request<unknown[]>(`/api/teams/${id}/scores`),
   matchupHistory: (id: string) => request<unknown[]>(`/api/teams/${id}/matchup-history`),
+  setRoster: (id: string, starters: string[]) =>
+    request<{ message: string; roster: unknown[] }>(`/api/teams/${id}/roster`, {
+      method: 'PATCH',
+      body: JSON.stringify({ starters }),
+    }),
 };
 
 // =============================================

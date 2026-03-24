@@ -1,9 +1,8 @@
 'use client';
-import { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import Link from 'next/link';
 import { useAuthStore, useLeagueStore } from '@/lib/store';
-import { leagues as leaguesApi } from '@/lib/api';
+import { leagues as leaguesApi, auth as authApi } from '@/lib/api';
 import TopBar from '@/components/layout/TopBar';
 import type { League } from '@/types';
 
@@ -11,11 +10,27 @@ export default function DashboardPage() {
   const { user } = useAuthStore();
   const { setActiveLeague } = useLeagueStore();
 
-  const { data: leagueList, isLoading } = useSWR('/leagues', () => leaguesApi.list() as Promise<League[]>);
+  const { data: leagueList, isLoading } = useSWR(
+    '/leagues',
+    () => leaguesApi.list() as Promise<League[]>
+  );
+
+  const { data: userStats } = useSWR('/users/me/stats', () => authApi.stats());
 
   function selectLeague(league: League) {
     setActiveLeague(league);
   }
+
+  const record = userStats
+    ? `${userStats.total_wins}-${userStats.total_losses}${userStats.total_ties ? `-${userStats.total_ties}` : ''}`
+    : '—';
+
+  const quickStats = [
+    { label: 'Leagues',       value: userStats?.leagues_count ?? leagueList?.length ?? '—' },
+    { label: 'Season Record', value: record },
+    { label: 'Points For',    value: userStats ? Math.round(userStats.total_points_for) : '—' },
+    { label: 'Pending Trades',value: userStats?.pending_trades ?? '—' },
+  ];
 
   return (
     <div>
@@ -25,14 +40,9 @@ export default function DashboardPage() {
       />
 
       <div className="p-6 space-y-6">
-        {/* Quick Stats */}
+        {/* Quick Stats — real data */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {[
-            { label: 'Leagues', value: leagueList?.length || 0 },
-            { label: 'Trash Talks', value: '∞' },
-            { label: 'Chaos Level', value: '100%' },
-            { label: 'Mercy Given', value: '0' },
-          ].map((stat) => (
+          {quickStats.map((stat) => (
             <div key={stat.label} className="card text-center">
               <div className="stat-value text-3xl">{stat.value}</div>
               <div className="stat-label mt-1">{stat.label}</div>
@@ -102,7 +112,7 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* AI Callout */}
+        {/* CHAOS callout */}
         <div className="card-gold">
           <div className="flex items-center gap-3 mb-2">
             <span className="text-2xl">🤖</span>
