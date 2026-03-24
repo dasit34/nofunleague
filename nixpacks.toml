@@ -1,8 +1,0 @@
-[phases.install]
-cmds = ["cd packages/backend && npm install"]
-
-[phases.build]
-cmds = ["cd packages/backend && npm run build"]
-
-[start]
-cmd = "node packages/backend/dist/index.js"
