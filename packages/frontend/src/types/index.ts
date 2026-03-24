@@ -151,6 +151,69 @@ export interface Trade {
   items: TradeItem[];
 }
 
+// =============================================
+// Draft
+// =============================================
+
+export interface DraftSession {
+  id: string;
+  league_id: string;
+  status: 'pending' | 'active' | 'paused' | 'complete';
+  total_rounds: number;
+  seconds_per_pick: number;
+  current_pick: number;
+  draft_order: string[];
+  started_at: string | null;
+  paused_at: string | null;
+  completed_at: string | null;
+  pick_started_at: string | null;
+}
+
+export interface DraftTeam {
+  id: string;
+  name: string;
+  user_id: string;
+  display_name?: string;
+  avatar_url?: string;
+}
+
+export interface DraftPickRow {
+  id: string;
+  session_id: string;
+  league_id: string;
+  team_id: string;
+  player_id: string;
+  overall_pick: number;
+  round: number;
+  pick_in_round: number;
+  is_auto_pick: boolean;
+  picked_at: string;
+  player_name: string;
+  position: string;
+  nfl_team: string;
+  team_name: string;
+}
+
+export interface DraftState {
+  session: DraftSession;
+  teams: DraftTeam[];
+  picks: DraftPickRow[];
+  currentTeamId: string | null;
+  secondsRemaining: number;
+  round: number;
+  pickInRound: number;
+}
+
+export interface DraftAvailablePlayer {
+  id: string;
+  full_name: string;
+  position: string;
+  nfl_team: string;
+  injury_status?: string;
+  status: string;
+  avg_ppr: number;
+}
+
 export interface ApiResponse<T> {
   data?: T;
   error?: string;

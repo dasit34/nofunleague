@@ -11,6 +11,7 @@ import playersRouter from './routes/players';
 import chatRouter from './routes/chat';
 import aiRouter from './routes/ai';
 import tradesRouter from './routes/trades';
+import draftRouter from './routes/draft';
 import { errorHandler, notFound } from './middleware/errorHandler';
 import { validateEnv } from './config/startup';
 import { startScheduler } from './services/scheduler';
@@ -76,6 +77,7 @@ app.use('/api/players', playersRouter);
 app.use('/api/chat', chatRouter);
 app.use('/api/ai', aiLimiter, aiRouter);
 app.use('/api/trades', tradesRouter);
+app.use('/api/draft', draftRouter);
 
 // =============================================
 // Error Handling

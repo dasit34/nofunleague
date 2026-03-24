@@ -11,6 +11,7 @@ const navItems = [
   { href: '/dashboard/standings',  label: 'Standings',   icon: '🏆' },
   { href: '/dashboard/roster',     label: 'My Roster',   icon: '👥' },
   { href: '/dashboard/players',    label: 'Players',     icon: '🏈' },
+  { href: '/dashboard/draft',      label: 'Draft',       icon: '📋' },
   { href: '/dashboard/trades',     label: 'Trades',      icon: '🔄' },
   { href: '/dashboard/chat',       label: 'League Chat', icon: '💬' },
   { href: '/dashboard/ai',         label: 'AI Chaos',    icon: '🤖' },

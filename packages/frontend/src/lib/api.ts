@@ -186,6 +186,25 @@ export const ai = {
 };
 
 // =============================================
+// Draft
+// =============================================
+export const draft = {
+  start: (leagueId: string, data?: { total_rounds?: number; seconds_per_pick?: number }) =>
+    request<unknown>(`/api/draft/${leagueId}/start`, { method: 'POST', body: JSON.stringify(data || {}) }),
+
+  getState: (leagueId: string) =>
+    request<unknown>(`/api/draft/${leagueId}/state`),
+
+  pick: (leagueId: string, player_id: string) =>
+    request<unknown>(`/api/draft/${leagueId}/pick`, { method: 'POST', body: JSON.stringify({ player_id }) }),
+
+  available: (leagueId: string, params?: { position?: string; search?: string; limit?: number }) => {
+    const qs = new URLSearchParams(params as Record<string, string>).toString();
+    return request<unknown[]>(`/api/draft/${leagueId}/available${qs ? `?${qs}` : ''}`);
+  },
+};
+
+// =============================================
 // Trades
 // =============================================
 export const trades = {
