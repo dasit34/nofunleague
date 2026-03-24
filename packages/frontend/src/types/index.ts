@@ -119,6 +119,38 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export interface TradeItem {
+  id: string;
+  trade_id: string;
+  player_id: string;
+  player_name: string;
+  position: string;
+  nfl_team: string;
+  from_team_id: string;
+  from_team_name: string;
+  to_team_id: string;
+  to_team_name: string;
+}
+
+export interface Trade {
+  id: string;
+  league_id: string;
+  proposing_team_id: string;
+  proposing_team_name: string;
+  proposing_owner?: string;
+  receiving_team_id: string;
+  receiving_team_name: string;
+  receiving_owner?: string;
+  status: 'pending' | 'accepted' | 'rejected' | 'approved' | 'vetoed';
+  proposer_note?: string;
+  response_note?: string;
+  commissioner_note?: string;
+  proposed_at: string;
+  responded_at?: string;
+  decided_at?: string;
+  items: TradeItem[];
+}
+
 export interface ApiResponse<T> {
   data?: T;
   error?: string;

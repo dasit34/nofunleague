@@ -1,4 +1,4 @@
-import type { User } from '@/types';
+import type { User, Trade } from '@/types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -162,4 +162,42 @@ export const ai = {
 
   lineupAdvice: (teamId: string, week: number) =>
     request<{ text: string }>(`/api/ai/lineup-advice/${teamId}/${week}`),
+
+  waiverRecs: (leagueId: string, week: number) =>
+    request<{ text: string; players: Array<{ playerName: string; position: string; nflTeam: string; projected: number; last3Avg: number; injuryStatus?: string }> }>(`/api/ai/waiver-recs/${leagueId}/${week}`),
+};
+
+// =============================================
+// Trades
+// =============================================
+export const trades = {
+  history: (leagueId: string) =>
+    request<Trade[]>(`/api/trades/history?league_id=${leagueId}`),
+
+  inbox: (leagueId: string) =>
+    request<Trade[]>(`/api/trades/inbox?league_id=${leagueId}`),
+
+  pendingApproval: (leagueId: string) =>
+    request<Trade[]>(`/api/trades/pending-approval?league_id=${leagueId}`),
+
+  propose: (data: {
+    league_id: string;
+    proposing_team_id: string;
+    receiving_team_id: string;
+    proposing_player_ids: string[];
+    receiving_player_ids: string[];
+    proposer_note?: string;
+  }) => request<Trade>('/api/trades/propose', { method: 'POST', body: JSON.stringify(data) }),
+
+  respond: (tradeId: string, action: 'accept' | 'reject', response_note?: string) =>
+    request<Trade>(`/api/trades/${tradeId}/respond`, {
+      method: 'POST',
+      body: JSON.stringify({ action, response_note }),
+    }),
+
+  approve: (tradeId: string, action: 'approve' | 'veto', commissioner_note?: string) =>
+    request<Trade>(`/api/trades/${tradeId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ action, commissioner_note }),
+    }),
 };

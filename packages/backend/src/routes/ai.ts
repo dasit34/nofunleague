@@ -9,6 +9,8 @@ import {
   generateTradeReaction,
   generateLineupAdvice,
   generateWaiverRecommendations,
+  type LineupAdviceContext,
+  type WaiverRecsContext,
 } from '../services/anthropicService';
 
 const router = Router();
@@ -168,20 +170,145 @@ router.post('/trade-reaction', authenticate, async (req: AuthRequest, res: Respo
   res.json({ text });
 });
 
-// GET /api/ai/lineup-advice/:teamId/:week — Phase 2 placeholder
+// GET /api/ai/lineup-advice/:teamId/:week
 router.get('/lineup-advice/:teamId/:week', authenticate, async (req: AuthRequest, res: Response) => {
-  const teamId = Array.isArray(req.params.teamId) ? req.params.teamId[0] : req.params.teamId;
-  const week = Array.isArray(req.params.week) ? parseInt(req.params.week[0]) : parseInt(req.params.week);
-  const text = await generateLineupAdvice(teamId, week);
+  const teamId = req.params.teamId as string;
+  const week = parseInt(req.params.week as string);
+
+  // Fetch team + league info
+  const { rows: [team] } = await query(
+    `SELECT t.name, t.league_id, u.display_name, l.season, l.id as league_id
+     FROM teams t
+     LEFT JOIN users u ON u.id = t.user_id
+     JOIN leagues l ON l.id = t.league_id
+     WHERE t.id = $1`,
+    [teamId]
+  );
+  if (!team) { res.status(404).json({ error: 'Team not found' }); return; }
+
+  const prevWeekStart = Math.max(1, week - 3);
+  const prevWeekEnd = Math.max(1, week - 1);
+
+  // Fetch roster with projected stats for this week and 3-week average
+  const { rows: roster } = await query(
+    `SELECT
+       r.is_starter, r.roster_slot,
+       p.full_name, p.position, p.nfl_team, p.injury_status,
+       COALESCE(ps.fantasy_pts_ppr, 0)::float AS projected,
+       COALESCE(
+         (SELECT AVG(ps2.fantasy_pts_ppr)
+          FROM player_stats ps2
+          WHERE ps2.player_id = p.id
+            AND ps2.season = $2
+            AND ps2.week BETWEEN $3 AND $4
+            AND ps2.season_type = 'regular'),
+         0
+       )::float AS last3_avg
+     FROM rosters r
+     JOIN players p ON p.id = r.player_id
+     LEFT JOIN player_stats ps ON ps.player_id = p.id
+       AND ps.season = $2 AND ps.week = $5 AND ps.season_type = 'regular'
+     WHERE r.team_id = $1
+     ORDER BY r.is_starter DESC, r.roster_slot`,
+    [teamId, team.season, prevWeekStart, prevWeekEnd, week]
+  );
+
+  const mapPlayer = (p: Record<string, unknown>) => ({
+    slot: (p.roster_slot as string) || 'BN',
+    playerName: p.full_name as string,
+    position: p.position as string,
+    nflTeam: (p.nfl_team as string) || 'FA',
+    projected: p.projected as number,
+    last3Avg: p.last3_avg as number,
+    injuryStatus: p.injury_status as string | undefined,
+  });
+
+  const ctx: LineupAdviceContext = {
+    teamName: team.name,
+    ownerName: team.display_name || 'Manager',
+    week,
+    starters: roster.filter((p: Record<string, unknown>) => p.is_starter).map(mapPlayer),
+    bench: roster.filter((p: Record<string, unknown>) => !p.is_starter).map(mapPlayer),
+  };
+
+  const text = await generateLineupAdvice(ctx);
+
+  // Log generation
+  await query(
+    `INSERT INTO ai_generations (league_id, generation_type, model, input_context, output_text)
+     VALUES ($1, 'lineup_advice', 'claude-sonnet-4-20250514', $2, $3)`,
+    [team.league_id, JSON.stringify(ctx), text]
+  );
+
   res.json({ text });
 });
 
-// GET /api/ai/waiver-recs/:leagueId/:week — Phase 3 placeholder
+// GET /api/ai/waiver-recs/:leagueId/:week
 router.get('/waiver-recs/:leagueId/:week', authenticate, async (req: AuthRequest, res: Response) => {
-  const leagueId = Array.isArray(req.params.leagueId) ? req.params.leagueId[0] : req.params.leagueId;
-  const week = Array.isArray(req.params.week) ? parseInt(req.params.week[0]) : parseInt(req.params.week);
-  const text = await generateWaiverRecommendations(leagueId, week);
-  res.json({ text });
+  const leagueId = req.params.leagueId as string;
+  const week = parseInt(req.params.week as string);
+
+  const { rows: [league] } = await query('SELECT * FROM leagues WHERE id = $1', [leagueId]);
+  if (!league) { res.status(404).json({ error: 'League not found' }); return; }
+
+  const prevWeekStart = Math.max(1, week - 3);
+  const prevWeekEnd = Math.max(1, week - 1);
+
+  // Find active players NOT on any roster in this league, sorted by recent production
+  const { rows: available } = await query(
+    `SELECT
+       p.full_name, p.position, p.nfl_team, p.injury_status,
+       COALESCE(ps.fantasy_pts_ppr, 0)::float AS projected,
+       COALESCE(
+         (SELECT AVG(ps2.fantasy_pts_ppr)
+          FROM player_stats ps2
+          WHERE ps2.player_id = p.id
+            AND ps2.season = $2
+            AND ps2.week BETWEEN $3 AND $4
+            AND ps2.season_type = 'regular'),
+         0
+       )::float AS last3_avg
+     FROM players p
+     LEFT JOIN player_stats ps ON ps.player_id = p.id
+       AND ps.season = $2 AND ps.week = $5 AND ps.season_type = 'regular'
+     WHERE p.position IN ('QB', 'RB', 'WR', 'TE', 'K', 'DEF')
+       AND (p.status = 'Active' OR p.status IS NULL)
+       AND p.injury_status NOT IN ('IR', 'O') OR p.injury_status IS NULL
+       AND p.id NOT IN (
+         SELECT r.player_id FROM rosters r
+         JOIN teams t ON t.id = r.team_id
+         WHERE t.league_id = $1
+       )
+     ORDER BY COALESCE(ps.fantasy_pts_ppr, 0) DESC, last3_avg DESC
+     LIMIT 30`,
+    [leagueId, league.season, prevWeekStart, prevWeekEnd, week]
+  );
+
+  const availablePlayers = available.map((p: Record<string, unknown>) => ({
+    playerName: p.full_name as string,
+    position: p.position as string,
+    nflTeam: (p.nfl_team as string) || 'FA',
+    projected: p.projected as number,
+    last3Avg: p.last3_avg as number,
+    injuryStatus: p.injury_status as string | undefined,
+  }));
+
+  const ctx: WaiverRecsContext = {
+    leagueName: league.name,
+    week,
+    scoringFormat: 'PPR',
+    availablePlayers,
+  };
+
+  const text = await generateWaiverRecommendations(ctx);
+
+  await query(
+    `INSERT INTO ai_generations (league_id, generation_type, model, input_context, output_text)
+     VALUES ($1, 'waiver_recs', 'claude-sonnet-4-20250514', $2, $3)`,
+    [leagueId, JSON.stringify({ week, playerCount: availablePlayers.length }), text]
+  );
+
+  res.json({ text, players: availablePlayers.slice(0, 10) });
 });
 
 export default router;

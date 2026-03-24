@@ -63,6 +63,43 @@ export interface TradeReactionContext {
   leagueContext?: string;
 }
 
+export interface LineupAdviceContext {
+  teamName: string;
+  ownerName: string;
+  week: number;
+  starters: Array<{
+    slot: string;
+    playerName: string;
+    position: string;
+    nflTeam: string;
+    projected: number;
+    last3Avg: number;
+    injuryStatus?: string;
+  }>;
+  bench: Array<{
+    playerName: string;
+    position: string;
+    nflTeam: string;
+    projected: number;
+    last3Avg: number;
+    injuryStatus?: string;
+  }>;
+}
+
+export interface WaiverRecsContext {
+  leagueName: string;
+  week: number;
+  scoringFormat: string;
+  availablePlayers: Array<{
+    playerName: string;
+    position: string;
+    nflTeam: string;
+    projected: number;
+    last3Avg: number;
+    injuryStatus?: string;
+  }>;
+}
+
 // =============================================
 // System Prompt
 // =============================================
@@ -185,17 +222,76 @@ Who won this trade? React in 2-3 sentences. Be opinionated and savage. Call out 
 }
 
 // =============================================
-// Phase 2 Hook: AI Lineup Advice (placeholder)
+// Phase 2: AI Lineup Advice
 // =============================================
-export async function generateLineupAdvice(_teamId: string, _week: number): Promise<string> {
-  // Phase 2: Analyze roster and give start/sit advice with trash talk flavor
-  return 'Phase 2 feature: AI lineup advice coming soon.';
+export async function generateLineupAdvice(ctx: LineupAdviceContext): Promise<string> {
+  const formatPlayer = (p: LineupAdviceContext['starters'][0] | LineupAdviceContext['bench'][0]) => {
+    const injury = p.injuryStatus ? ` [${p.injuryStatus}]` : '';
+    const proj = p.projected > 0 ? `, proj: ${p.projected.toFixed(1)}` : '';
+    const avg = p.last3Avg > 0 ? `, L3 avg: ${p.last3Avg.toFixed(1)}` : '';
+    return `${p.playerName} (${p.position}, ${p.nflTeam}${injury}${proj}${avg})`;
+  };
+
+  const starterLines = ctx.starters
+    .map(p => `  [${('slot' in p) ? (p as {slot: string}).slot : 'BN'}] ${formatPlayer(p)}`)
+    .join('\n');
+  const benchLines = ctx.bench.map(p => `  [BN] ${formatPlayer(p)}`).join('\n');
+
+  const prompt = `Give lineup advice for Week ${ctx.week}.
+
+Team: "${ctx.teamName}" owned by ${ctx.ownerName}
+
+CURRENT STARTERS:
+${starterLines || '  (none set)'}
+
+BENCH:
+${benchLines || '  (none)'}
+
+Analyze the lineup. Call out any obvious start/sit decisions, injury risks, or missed opportunities.
+Should anyone be swapped? Who's a must-start? Who's a liability?
+Be opinionated, specific, and include some trash talk flavor.
+Keep it under 200 words.`;
+
+  const response = await getClient().messages.create({
+    model: MODEL,
+    max_tokens: 512,
+    system: NFL_TRASH_TALK_SYSTEM,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  return (response.content[0] as { text: string }).text;
 }
 
 // =============================================
-// Phase 3 Hook: AI Waiver Recommendations (placeholder)
+// Phase 3: AI Waiver Recommendations
 // =============================================
-export async function generateWaiverRecommendations(_leagueId: string, _week: number): Promise<string> {
-  // Phase 3: Analyze waiver wire and recommend pickups
-  return 'Phase 3 feature: AI waiver recommendations coming soon.';
+export async function generateWaiverRecommendations(ctx: WaiverRecsContext): Promise<string> {
+  const playerLines = ctx.availablePlayers
+    .slice(0, 20)
+    .map(p => {
+      const injury = p.injuryStatus ? ` [${p.injuryStatus}]` : '';
+      const proj = p.projected > 0 ? `, proj: ${p.projected.toFixed(1)}` : '';
+      const avg = p.last3Avg > 0 ? `, L3 avg: ${p.last3Avg.toFixed(1)}` : '';
+      return `- ${p.playerName} (${p.position}, ${p.nflTeam}${injury}${proj}${avg})`;
+    })
+    .join('\n');
+
+  const prompt = `Generate waiver wire recommendations for Week ${ctx.week} in "${ctx.leagueName}" (${ctx.scoringFormat} scoring).
+
+TOP AVAILABLE FREE AGENTS:
+${playerLines || '  (no data available)'}
+
+Pick the top 3-5 players worth targeting on the waiver wire this week.
+For each, say who they are, why to grab them, and who to drop if necessary.
+Be direct and spicy. No patience for bad decisions.
+Keep it under 250 words.`;
+
+  const response = await getClient().messages.create({
+    model: MODEL,
+    max_tokens: 768,
+    system: NFL_TRASH_TALK_SYSTEM,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  return (response.content[0] as { text: string }).text;
 }

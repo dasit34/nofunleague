@@ -2,24 +2,56 @@
 import { useState } from 'react';
 import useSWR from 'swr';
 import { ai as aiApi, leagues as leaguesApi } from '@/lib/api';
-import { useLeagueStore } from '@/lib/store';
+import { useAuthStore, useLeagueStore } from '@/lib/store';
 import TopBar from '@/components/layout/TopBar';
-import type { Matchup } from '@/types';
+import type { Matchup, League, Team } from '@/types';
+
+const STYLES = ['aggressive', 'petty', 'poetic', 'silent'] as const;
 
 export default function AIPage() {
   const activeLeague = useLeagueStore((s) => s.activeLeague);
+  const { user } = useAuthStore();
+
+  // Weekly Recap
   const [recapLoading, setRecapLoading] = useState(false);
   const [recapText, setRecapText] = useState('');
+
+  // Trash Talk
   const [trashTarget, setTrashTarget] = useState('');
   const [trashMatchup, setTrashMatchup] = useState('');
-  const [trashStyle, setTrashStyle] = useState('aggressive');
+  const [trashStyle, setTrashStyle] = useState<typeof STYLES[number]>('aggressive');
   const [trashLoading, setTrashLoading] = useState(false);
   const [trashText, setTrashText] = useState('');
+
+  // Trade Reaction
+  const [trade, setTrade] = useState({
+    team1_name: '',
+    team1_giving: '',
+    team2_name: '',
+    team2_giving: '',
+  });
+  const [tradeLoading, setTradeLoading] = useState(false);
+  const [tradeText, setTradeText] = useState('');
+
+  // Lineup Advice
+  const [lineupLoading, setLineupLoading] = useState(false);
+  const [lineupText, setLineupText] = useState('');
+
+  // Waiver Recs
+  const [waiverLoading, setWaiverLoading] = useState(false);
+  const [waiverText, setWaiverText] = useState('');
 
   const { data: matchups } = useSWR(
     activeLeague ? `/leagues/${activeLeague.id}/matchups/${activeLeague.week}` : null,
     () => leaguesApi.getMatchups(activeLeague!.id, activeLeague!.week) as Promise<Matchup[]>
   );
+
+  const { data: leagueData } = useSWR(
+    activeLeague && user ? `/leagues/${activeLeague.id}/full` : null,
+    () => leaguesApi.get(activeLeague!.id) as Promise<League & { teams: Team[] }>
+  );
+
+  const myTeam = leagueData?.teams?.find((t) => t.user_id === user?.id);
 
   async function handleWeeklyRecap() {
     if (!activeLeague) return;
@@ -54,6 +86,55 @@ export default function AIPage() {
     }
   }
 
+  async function handleTradeReaction(e: React.FormEvent) {
+    e.preventDefault();
+    if (!activeLeague || !trade.team1_name || !trade.team2_name) return;
+    setTradeLoading(true);
+    setTradeText('');
+    try {
+      const { text } = await aiApi.tradeReaction({
+        league_id: activeLeague.id,
+        team1_name: trade.team1_name,
+        team1_giving: trade.team1_giving.split(',').map((s) => s.trim()).filter(Boolean),
+        team2_name: trade.team2_name,
+        team2_giving: trade.team2_giving.split(',').map((s) => s.trim()).filter(Boolean),
+      });
+      setTradeText(text);
+    } catch (err) {
+      setTradeText(`Error: ${(err as Error).message}`);
+    } finally {
+      setTradeLoading(false);
+    }
+  }
+
+  async function handleLineupAdvice() {
+    if (!activeLeague || !myTeam) return;
+    setLineupLoading(true);
+    setLineupText('');
+    try {
+      const { text } = await aiApi.lineupAdvice(myTeam.id, activeLeague.week);
+      setLineupText(text);
+    } catch (err) {
+      setLineupText(`Error: ${(err as Error).message}`);
+    } finally {
+      setLineupLoading(false);
+    }
+  }
+
+  async function handleWaiverRecs() {
+    if (!activeLeague) return;
+    setWaiverLoading(true);
+    setWaiverText('');
+    try {
+      const { text } = await aiApi.waiverRecs(activeLeague.id, activeLeague.week);
+      setWaiverText(text);
+    } catch (err) {
+      setWaiverText(`Error: ${(err as Error).message}`);
+    } finally {
+      setWaiverLoading(false);
+    }
+  }
+
   return (
     <div>
       <TopBar title="AI Chaos Center" subtitle="CHAOS awaits your command" />
@@ -69,7 +150,7 @@ export default function AIPage() {
                 <span className="text-3xl">🤖</span>
                 <div>
                   <h2 className="text-gold font-black text-xl">CHAOS</h2>
-                  <p className="text-white/50 text-sm">Your AI Commissioner — Powered by Claude claude-sonnet-4-20250514</p>
+                  <p className="text-white/50 text-sm">Your AI Commissioner — Powered by Claude</p>
                 </div>
               </div>
             </div>
@@ -89,11 +170,8 @@ export default function AIPage() {
                   {recapLoading ? 'Writing...' : 'Generate Recap'}
                 </button>
               </div>
-
               {recapText && (
-                <div className="ai-message animate-slide-up whitespace-pre-wrap">
-                  {recapText}
-                </div>
+                <div className="ai-message animate-slide-up whitespace-pre-wrap">{recapText}</div>
               )}
             </div>
 
@@ -103,7 +181,6 @@ export default function AIPage() {
                 <h3 className="text-white font-black text-lg">Fire Trash Talk</h3>
                 <p className="text-white/40 text-sm">Target a team and let CHAOS do the talking</p>
               </div>
-
               {matchups && matchups.length > 0 ? (
                 <div className="space-y-3">
                   <div>
@@ -121,7 +198,6 @@ export default function AIPage() {
                       ))}
                     </select>
                   </div>
-
                   {trashMatchup && (
                     <div>
                       <label className="text-white/60 text-sm font-semibold mb-1.5 block">Target Team</label>
@@ -135,16 +211,14 @@ export default function AIPage() {
                           ])
                           .map((t) => (
                             <option key={t.id} value={t.id}>{t.name}</option>
-                          ))
-                        }
+                          ))}
                       </select>
                     </div>
                   )}
-
                   <div>
                     <label className="text-white/60 text-sm font-semibold mb-1.5 block">Roast Style</label>
                     <div className="grid grid-cols-4 gap-2">
-                      {['aggressive', 'petty', 'poetic', 'silent'].map((s) => (
+                      {STYLES.map((s) => (
                         <button
                           key={s}
                           type="button"
@@ -160,7 +234,6 @@ export default function AIPage() {
                       ))}
                     </div>
                   </div>
-
                   <button
                     onClick={handleTrashTalk}
                     disabled={trashLoading || !trashMatchup || !trashTarget}
@@ -168,7 +241,6 @@ export default function AIPage() {
                   >
                     {trashLoading ? 'Cooking up chaos...' : 'Unleash CHAOS'}
                   </button>
-
                   {trashText && (
                     <div className="ai-message animate-slide-up">
                       <p className="font-bold text-gold mb-1 text-xs uppercase tracking-wider">CHAOS says:</p>
@@ -184,24 +256,121 @@ export default function AIPage() {
               )}
             </div>
 
-            {/* Phase 2/3 Previews */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="card opacity-60">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-xl">🎯</span>
-                  <span className="text-white font-bold">AI Lineup Advice</span>
-                  <span className="badge bg-blue-500/20 text-blue-400 border border-blue-500/30 text-xs">Phase 2</span>
-                </div>
-                <p className="text-white/40 text-sm">Start/sit recommendations with trash talk flavor.</p>
+            {/* Trade Reaction */}
+            <div className="card space-y-4">
+              <div>
+                <h3 className="text-white font-black text-lg">Trade Reaction</h3>
+                <p className="text-white/40 text-sm">Who got robbed? Let CHAOS decide.</p>
               </div>
-              <div className="card opacity-60">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-xl">📋</span>
-                  <span className="text-white font-bold">AI Waiver Wire</span>
-                  <span className="badge bg-purple-500/20 text-purple-400 border border-purple-500/30 text-xs">Phase 3</span>
+              <form onSubmit={handleTradeReaction} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-white/60 text-sm font-semibold block">Team 1</label>
+                    <input
+                      type="text"
+                      className="input-dark"
+                      placeholder="Team name"
+                      value={trade.team1_name}
+                      onChange={(e) => setTrade({ ...trade, team1_name: e.target.value })}
+                    />
+                    <textarea
+                      className="input-dark resize-none"
+                      rows={2}
+                      placeholder="Players giving away (comma-separated)"
+                      value={trade.team1_giving}
+                      onChange={(e) => setTrade({ ...trade, team1_giving: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-white/60 text-sm font-semibold block">Team 2</label>
+                    <input
+                      type="text"
+                      className="input-dark"
+                      placeholder="Team name"
+                      value={trade.team2_name}
+                      onChange={(e) => setTrade({ ...trade, team2_name: e.target.value })}
+                    />
+                    <textarea
+                      className="input-dark resize-none"
+                      rows={2}
+                      placeholder="Players giving away (comma-separated)"
+                      value={trade.team2_giving}
+                      onChange={(e) => setTrade({ ...trade, team2_giving: e.target.value })}
+                    />
+                  </div>
                 </div>
-                <p className="text-white/40 text-sm">AI-powered waiver wire recommendations.</p>
+                <button
+                  type="submit"
+                  disabled={tradeLoading || !trade.team1_name || !trade.team2_name}
+                  className="btn-gold w-full"
+                >
+                  {tradeLoading ? 'Judging...' : 'Get Trade Verdict'}
+                </button>
+                {tradeText && (
+                  <div className="ai-message animate-slide-up">
+                    <p className="font-bold text-gold mb-1 text-xs uppercase tracking-wider">CHAOS Verdict:</p>
+                    <p className="whitespace-pre-wrap">{tradeText}</p>
+                  </div>
+                )}
+              </form>
+            </div>
+
+            {/* AI Lineup Advice */}
+            <div className="card space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <h3 className="text-white font-black text-lg">AI Lineup Advice</h3>
+                    <span className="badge bg-blue-500/20 text-blue-400 border border-blue-500/30 text-xs">Phase 2</span>
+                  </div>
+                  <p className="text-white/40 text-sm">
+                    {myTeam
+                      ? `Analyzing Week ${activeLeague.week} roster for ${myTeam.name}`
+                      : 'You need a team in this league to get lineup advice'}
+                  </p>
+                </div>
+                <button
+                  onClick={handleLineupAdvice}
+                  disabled={lineupLoading || !myTeam}
+                  className="btn-gold py-2 px-4 text-sm"
+                >
+                  {lineupLoading ? 'Analyzing...' : 'Get Advice'}
+                </button>
               </div>
+              {lineupText && (
+                <div className="ai-message animate-slide-up">
+                  <p className="font-bold text-gold mb-1 text-xs uppercase tracking-wider">CHAOS on your lineup:</p>
+                  <p className="whitespace-pre-wrap">{lineupText}</p>
+                </div>
+              )}
+            </div>
+
+            {/* AI Waiver Wire */}
+            <div className="card space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <h3 className="text-white font-black text-lg">AI Waiver Wire</h3>
+                    <span className="badge bg-purple-500/20 text-purple-400 border border-purple-500/30 text-xs">Phase 3</span>
+                  </div>
+                  <p className="text-white/40 text-sm">
+                    Week {activeLeague.week} free agent recommendations for {activeLeague.name}
+                  </p>
+                </div>
+                <button
+                  onClick={handleWaiverRecs}
+                  disabled={waiverLoading}
+                  className="btn-gold py-2 px-4 text-sm"
+                >
+                  {waiverLoading ? 'Scouting...' : 'Get Recs'}
+                </button>
+              </div>
+              {waiverText && (
+                <div className="ai-message animate-slide-up">
+                  <p className="font-bold text-gold mb-1 text-xs uppercase tracking-wider">CHAOS Waiver Picks:</p>
+                  <p className="whitespace-pre-wrap">{waiverText}</p>
+                </div>
+              )}
             </div>
           </>
         )}
