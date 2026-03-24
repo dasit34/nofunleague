@@ -1,6 +1,17 @@
 import Anthropic from '@anthropic-ai/sdk';
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// Lazy client — instantiated on first use so a missing ANTHROPIC_API_KEY
+// during Railway startup doesn't crash the process before app.listen fires.
+let _client: Anthropic | null = null;
+function getClient(): Anthropic {
+  if (!_client) {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      throw new Error('ANTHROPIC_API_KEY environment variable is not set');
+    }
+    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return _client;
+}
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MAX_TOKENS = 1024;
@@ -91,7 +102,7 @@ Style: ${styleGuide}
 
 Generate 1-3 sentences of brutal fantasy football trash talk directed at ${ctx.targetOwnerName}.`;
 
-  const response = await client.messages.create({
+  const response = await getClient().messages.create({
     model: MODEL,
     max_tokens: MAX_TOKENS,
     system: NFL_TRASH_TALK_SYSTEM,
@@ -122,7 +133,7 @@ Write an entertaining 3-5 paragraph weekly recap in the style of a sports column
 Celebrate winners, roast losers, call out lucky wins and unlucky losses. Be dramatic. Be savage. Be funny.
 End with a spicy prediction or warning for next week.`;
 
-  const response = await client.messages.create({
+  const response = await getClient().messages.create({
     model: MODEL,
     max_tokens: 2048,
     system: NFL_TRASH_TALK_SYSTEM,
@@ -142,7 +153,7 @@ ${ctx.previousPickContext ? `Context: ${ctx.previousPickContext}` : ''}
 
 Write 1-2 sentences of live draft commentary. Be opinionated — was this a steal, a reach, or a disaster?`;
 
-  const response = await client.messages.create({
+  const response = await getClient().messages.create({
     model: MODEL,
     max_tokens: 256,
     system: NFL_TRASH_TALK_SYSTEM,
@@ -163,7 +174,7 @@ ${ctx.leagueContext ? `League context: ${ctx.leagueContext}` : ''}
 
 Who won this trade? React in 2-3 sentences. Be opinionated and savage. Call out anyone getting robbed.`;
 
-  const response = await client.messages.create({
+  const response = await getClient().messages.create({
     model: MODEL,
     max_tokens: 512,
     system: NFL_TRASH_TALK_SYSTEM,
