@@ -11,8 +11,10 @@ import playersRouter from './routes/players';
 import chatRouter from './routes/chat';
 import aiRouter from './routes/ai';
 import { errorHandler, notFound } from './middleware/errorHandler';
+import { validateEnv } from './config/startup';
 
 dotenv.config();
+validateEnv();
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
