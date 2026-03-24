@@ -18,6 +18,15 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // =============================================
+// Health check — before all middleware so
+// Railway's healthcheck is never rate-limited
+// or blocked by CORS / helmet
+// =============================================
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'ok', app: 'The No Fun League API', timestamp: new Date().toISOString() });
+});
+
+// =============================================
 // Security & Middleware
 // =============================================
 app.use(helmet());
@@ -46,10 +55,6 @@ const aiLimiter = rateLimit({
 // =============================================
 // Routes
 // =============================================
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', app: 'The No Fun League API', timestamp: new Date().toISOString() });
-});
-
 app.use('/api/users', usersRouter);
 app.use('/api/leagues', leaguesRouter);
 app.use('/api/teams', teamsRouter);
