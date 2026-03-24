@@ -13,6 +13,7 @@ import aiRouter from './routes/ai';
 import tradesRouter from './routes/trades';
 import draftRouter from './routes/draft';
 import invitesRouter from './routes/invites';
+import adminRouter from './routes/admin';
 import { errorHandler, notFound } from './middleware/errorHandler';
 import { validateEnv } from './config/startup';
 import { startScheduler } from './services/scheduler';
@@ -79,7 +80,8 @@ app.use('/api/chat', chatRouter);
 app.use('/api/ai', aiLimiter, aiRouter);
 app.use('/api/trades', tradesRouter);
 app.use('/api/draft', draftRouter);
-app.use('/api', invitesRouter);   // mounts /api/leagues/:id/invite + /api/invites/:code
+app.use('/api', invitesRouter);       // /api/leagues/:id/invite + /api/invites/:code
+app.use('/api/admin', adminRouter);   // /api/admin/sync  (X-Admin-Secret protected)
 
 // =============================================
 // Error Handling
