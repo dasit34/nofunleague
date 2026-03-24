@@ -50,10 +50,24 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
 
 // =============================================
 // GET /api/leagues/:id — league details with teams
+// Only accessible to commissioner or league members
 // =============================================
 router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   const { rows: [league] } = await query('SELECT * FROM leagues WHERE id = $1', [req.params.id]);
   if (!league) { res.status(404).json({ error: 'League not found' }); return; }
+
+  // Authorization: commissioner or member (has a team in this league)
+  const isCommissioner = league.commissioner_id === req.user!.id;
+  if (!isCommissioner) {
+    const { rows: [membership] } = await query(
+      'SELECT id FROM teams WHERE league_id = $1 AND user_id = $2',
+      [league.id, req.user!.id]
+    );
+    if (!membership) {
+      res.status(403).json({ error: 'You are not a member of this league' });
+      return;
+    }
+  }
 
   const { rows: teams } = await query(
     `SELECT t.*, u.display_name, u.avatar_url, u.trash_talk_style
@@ -220,8 +234,27 @@ router.post('/:id/sync-sleeper', authenticate, requireCommissioner, async (req: 
 
 // =============================================
 // GET /api/leagues/:id/matchups/:week
+// Members only
 // =============================================
 router.get('/:id/matchups/:week', authenticate, async (req: AuthRequest, res: Response) => {
+  const leagueId = req.params.id as string;
+
+  const { rows: [league] } = await query(
+    'SELECT commissioner_id FROM leagues WHERE id = $1', [leagueId]
+  );
+  if (!league) { res.status(404).json({ error: 'League not found' }); return; }
+
+  if (league.commissioner_id !== req.user!.id) {
+    const { rows: [membership] } = await query(
+      'SELECT id FROM teams WHERE league_id = $1 AND user_id = $2',
+      [leagueId, req.user!.id]
+    );
+    if (!membership) {
+      res.status(403).json({ error: 'You are not a member of this league' });
+      return;
+    }
+  }
+
   const week = parseInt(req.params.week as string);
   const { rows } = await query(
     `SELECT m.*,
