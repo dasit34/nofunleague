@@ -186,6 +186,26 @@ export const ai = {
 };
 
 // =============================================
+// Invites
+// =============================================
+export const invites = {
+  generate: (leagueId: string, opts?: { max_uses?: number; expires_in_days?: number }) =>
+    request<unknown>(`/api/leagues/${leagueId}/invite`, { method: 'POST', body: JSON.stringify(opts || {}) }),
+
+  getCurrent: (leagueId: string) =>
+    request<unknown>(`/api/leagues/${leagueId}/invite`),
+
+  deactivate: (leagueId: string) =>
+    request<{ message: string }>(`/api/leagues/${leagueId}/invite`, { method: 'DELETE' }),
+
+  preview: (code: string) =>
+    request<unknown>(`/api/invites/${code}`),
+
+  join: (code: string) =>
+    request<{ message: string; league_id: string; team: unknown }>(`/api/invites/${code}/join`, { method: 'POST', body: '{}' }),
+};
+
+// =============================================
 // Draft
 // =============================================
 export const draft = {

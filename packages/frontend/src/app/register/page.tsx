@@ -1,7 +1,7 @@
 'use client';
-import { useState } from 'react';
+import { useState, Suspense } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { auth } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 import type { User } from '@/types';
@@ -13,8 +13,9 @@ const STYLES = [
   { value: 'silent', label: 'Silent', desc: 'Cold. Dismissive. Devastating.' },
 ];
 
-export default function RegisterPage() {
+function RegisterForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const setAuth = useAuthStore((s) => s.setAuth);
   const [form, setForm] = useState({
     username: '',
@@ -33,7 +34,8 @@ export default function RegisterPage() {
     try {
       const { user, token } = await auth.register(form);
       setAuth(user as User, token);
-      router.push('/dashboard');
+      const redirect = searchParams.get('redirect');
+      router.push(redirect || '/dashboard');
     } catch (err) {
       setError((err as Error).message || 'Registration failed');
     } finally {
@@ -143,5 +145,13 @@ export default function RegisterPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense>
+      <RegisterForm />
+    </Suspense>
   );
 }

@@ -32,7 +32,8 @@ function LoginForm() {
     try {
       const { user, token } = await auth.login(form);
       setAuth(user, token);
-      router.push('/dashboard');
+      const redirect = searchParams.get('redirect');
+      router.push(redirect || '/dashboard');
     } catch (err) {
       setError((err as Error).message || 'Login failed');
     } finally {

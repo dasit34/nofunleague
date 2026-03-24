@@ -152,6 +152,31 @@ export interface Trade {
 }
 
 // =============================================
+// Invites
+// =============================================
+
+export interface LeagueInvite {
+  id: string;
+  league_id: string;
+  code: string;
+  created_by: string;
+  max_uses: number | null;
+  uses: number;
+  expires_at: string | null;
+  is_active: boolean;
+  created_at: string;
+  // Preview fields (joined)
+  league_name?: string;
+  season?: number;
+  week?: number;
+  league_status?: string;
+  commissioner_name?: string;
+  team_count?: number;
+  max_teams?: number;
+  already_member?: boolean;
+}
+
+// =============================================
 // Draft
 // =============================================
 

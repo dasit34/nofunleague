@@ -3,10 +3,10 @@ import { use, useEffect, useState } from 'react';
 import useSWR from 'swr';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { leagues as leaguesApi } from '@/lib/api';
+import { leagues as leaguesApi, invites as invitesApi } from '@/lib/api';
 import { useAuthStore, useLeagueStore } from '@/lib/store';
 import TopBar from '@/components/layout/TopBar';
-import type { League, Team } from '@/types';
+import type { League, Team, LeagueInvite } from '@/types';
 
 export default function LeaguePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -19,6 +19,12 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
     () => leaguesApi.get(id) as Promise<League & { teams: Team[] }>
   );
 
+  const { data: currentInvite, mutate: mutateInvite } = useSWR<LeagueInvite | null>(
+    league?.commissioner_id === user?.id ? `/leagues/${id}/invite` : null,
+    () => invitesApi.getCurrent(id) as Promise<LeagueInvite | null>,
+    { shouldRetryOnError: false }
+  );
+
   const [syncLoading, setSyncLoading]   = useState(false);
   const [syncMsg, setSyncMsg]           = useState('');
   const [syncErr, setSyncErr]           = useState('');
@@ -28,6 +34,8 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
   const [importErr, setImportErr]       = useState('');
   const [weekInput, setWeekInput]       = useState<number>(1);
   const [weekLoading, setWeekLoading]   = useState(false);
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [inviteCopied, setInviteCopied]   = useState(false);
 
   useEffect(() => {
     if (league) {
@@ -83,6 +91,39 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
     } finally {
       setWeekLoading(false);
     }
+  }
+
+  async function handleGenerateInvite() {
+    setInviteLoading(true);
+    try {
+      await invitesApi.generate(id);
+      await mutateInvite();
+    } catch (err) {
+      setSyncErr((err as Error).message);
+    } finally {
+      setInviteLoading(false);
+    }
+  }
+
+  async function handleDeactivateInvite() {
+    setInviteLoading(true);
+    try {
+      await invitesApi.deactivate(id);
+      await mutateInvite();
+    } catch (err) {
+      setSyncErr((err as Error).message);
+    } finally {
+      setInviteLoading(false);
+    }
+  }
+
+  function copyInviteLink() {
+    if (!currentInvite) return;
+    const url = `${window.location.origin}/join/${currentInvite.code}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setInviteCopied(true);
+      setTimeout(() => setInviteCopied(false), 2000);
+    });
   }
 
   function goToMatchups() {
@@ -195,6 +236,62 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
                   {weekLoading ? 'Updating...' : 'Set Week'}
                 </button>
               </div>
+            </div>
+
+            {/* Invite Players */}
+            <div className="space-y-3 border-t border-white/10 pt-4">
+              <label className="text-white/60 text-xs font-semibold uppercase tracking-wider block">
+                Invite Players
+              </label>
+
+              {currentInvite ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2">
+                    <span className="text-white/40 text-xs">Code:</span>
+                    <span className="text-gold font-mono font-bold tracking-widest text-sm flex-1">
+                      {currentInvite.code}
+                    </span>
+                    <span className="text-white/30 text-xs">
+                      {currentInvite.uses} use{currentInvite.uses !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      onClick={copyInviteLink}
+                      className="btn-gold text-sm py-2 px-4 flex-1"
+                    >
+                      {inviteCopied ? '✓ Copied!' : '🔗 Copy Invite Link'}
+                    </button>
+                    <button
+                      onClick={handleGenerateInvite}
+                      disabled={inviteLoading}
+                      className="btn-outline-gold text-sm py-2 px-3"
+                      title="Generate a new code (deactivates current)"
+                    >
+                      ↻
+                    </button>
+                    <button
+                      onClick={handleDeactivateInvite}
+                      disabled={inviteLoading}
+                      className="btn-dark border border-white/10 text-sm py-2 px-3 text-white/40 hover:text-red-400 transition-colors"
+                      title="Deactivate invite"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-white/30 text-sm">No active invite link.</p>
+                  <button
+                    onClick={handleGenerateInvite}
+                    disabled={inviteLoading}
+                    className="btn-outline-gold text-sm py-2 px-4"
+                  >
+                    {inviteLoading ? 'Generating...' : '+ Generate Invite Link'}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
