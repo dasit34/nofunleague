@@ -1,25 +1,37 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { auth } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
-import type { User } from '@/types';
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
-  const setAuth = useAuthStore((s) => s.setAuth);
+  const searchParams = useSearchParams();
+  const { setAuth, user } = useAuthStore();
   const [form, setForm] = useState({ email: '', password: '' });
   const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (user) router.replace('/dashboard');
+  }, [user, router]);
+
+  useEffect(() => {
+    if (searchParams.get('session') === 'expired') {
+      setInfo('Your session expired. Please sign in again.');
+    }
+  }, [searchParams]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError('');
+    setInfo('');
     try {
       const { user, token } = await auth.login(form);
-      setAuth(user as User, token);
+      setAuth(user, token);
       router.push('/dashboard');
     } catch (err) {
       setError((err as Error).message || 'Login failed');
@@ -39,6 +51,12 @@ export default function LoginPage() {
         <div className="card-gold">
           <h1 className="text-2xl font-black text-white mb-6">Sign In</h1>
 
+          {info && (
+            <div className="bg-gold/10 border border-gold/30 rounded-lg p-3 mb-4 text-gold text-sm">
+              {info}
+            </div>
+          )}
+
           {error && (
             <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 mb-4 text-red-400 text-sm">
               {error}
@@ -55,6 +73,7 @@ export default function LoginPage() {
                 value={form.email}
                 onChange={(e) => setForm({ ...form, email: e.target.value })}
                 required
+                autoComplete="email"
               />
             </div>
             <div>
@@ -66,6 +85,7 @@ export default function LoginPage() {
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
                 required
+                autoComplete="current-password"
               />
             </div>
             <button type="submit" className="btn-gold w-full mt-2" disabled={loading}>
@@ -82,5 +102,13 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
   );
 }

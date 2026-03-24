@@ -1,8 +1,18 @@
+import type { User } from '@/types';
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 function getToken(): string | null {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem('nfl_token');
+}
+
+// Called by the 401 handler — imported lazily to avoid circular deps with store
+function handleUnauthenticated() {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem('nfl_token');
+  localStorage.removeItem('nfl-auth'); // zustand persist key
+  window.location.href = '/login?session=expired';
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -16,6 +26,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     },
   });
 
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({ code: '' }));
+    // Only auto-logout on token problems, not wrong password attempts
+    if (body.code === 'TOKEN_EXPIRED' || body.code === 'INVALID_TOKEN' || body.code === 'NO_TOKEN') {
+      handleUnauthenticated();
+      throw new Error('Session expired. Please sign in again.');
+    }
+    throw new Error(body.error || 'Unauthorized');
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || `HTTP ${res.status}`);
@@ -28,22 +48,43 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 // Auth
 // =============================================
 export const auth = {
-  register: (data: { username: string; email: string; password: string; display_name?: string; trash_talk_style?: string }) =>
-    request<{ user: unknown; token: string }>('/api/users/register', {
+  register: (data: {
+    username: string;
+    email: string;
+    password: string;
+    display_name?: string;
+    trash_talk_style?: string;
+  }) =>
+    request<{ user: User; token: string; expires_in: number }>('/api/users/register', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
   login: (data: { email: string; password: string }) =>
-    request<{ user: unknown; token: string }>('/api/users/login', {
+    request<{ user: User; token: string; expires_in: number }>('/api/users/login', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
-  me: () => request<unknown>('/api/users/me'),
+  logout: () =>
+    request<{ message: string }>('/api/users/logout', { method: 'POST' }),
 
-  updateProfile: (data: Record<string, unknown>) =>
-    request<unknown>('/api/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
+  me: () => request<User>('/api/users/me'),
+
+  updateProfile: (data: {
+    display_name?: string;
+    avatar_url?: string | null;
+    sleeper_user_id?: string | null;
+    trash_talk_style?: 'aggressive' | 'petty' | 'poetic' | 'silent';
+  }) => request<User>('/api/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
+
+  changePassword: (data: { current_password: string; new_password: string }) =>
+    request<{ message: string; token: string }>('/api/users/change-password', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getProfile: (username: string) => request<User>(`/api/users/${username}`),
 };
 
 // =============================================

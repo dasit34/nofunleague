@@ -52,10 +52,20 @@ const aiLimiter = rateLimit({
   message: { error: 'Too many AI requests. Slow your roll.' },
 });
 
+// Auth endpoints: max 10 failed attempts per 15 min (brute-force protection)
+// Note: per-route authLimiter also applied directly in users.ts
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many auth attempts. Try again later.' },
+});
+
 // =============================================
 // Routes
 // =============================================
-app.use('/api/users', usersRouter);
+app.use('/api/users', authLimiter, usersRouter);
 app.use('/api/leagues', leaguesRouter);
 app.use('/api/teams', teamsRouter);
 app.use('/api/players', playersRouter);

@@ -6,6 +6,7 @@ interface AuthState {
   user: User | null;
   token: string | null;
   setAuth: (user: User, token: string) => void;
+  updateUser: (user: Partial<User>) => void;
   clearAuth: () => void;
 }
 
@@ -14,10 +15,18 @@ export const useAuthStore = create<AuthState>()(
     (set) => ({
       user: null,
       token: null,
+
       setAuth: (user, token) => {
         localStorage.setItem('nfl_token', token);
         set({ user, token });
       },
+
+      updateUser: (partial) => {
+        set((state) => ({
+          user: state.user ? { ...state.user, ...partial } : null,
+        }));
+      },
+
       clearAuth: () => {
         localStorage.removeItem('nfl_token');
         set({ user: null, token: null });
@@ -26,6 +35,12 @@ export const useAuthStore = create<AuthState>()(
     {
       name: 'nfl-auth',
       partialize: (state) => ({ user: state.user, token: state.token }),
+      // Re-hydrate token into localStorage so getToken() in api.ts finds it
+      onRehydrateStorage: () => (state) => {
+        if (state?.token) {
+          localStorage.setItem('nfl_token', state.token);
+        }
+      },
     }
   )
 );
