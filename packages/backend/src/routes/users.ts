@@ -36,8 +36,7 @@ router.post('/register', async (req: Request, res: Response) => {
     const user = rows[0];
     const token = jwt.sign(
       { id: user.id, username: user.username, email: user.email },
-      process.env.JWT_SECRET!,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+      process.env.JWT_SECRET!
     );
 
     res.status(201).json({ user, token });
@@ -72,8 +71,7 @@ router.post('/login', async (req: Request, res: Response) => {
     const user = rows[0];
     const token = jwt.sign(
       { id: user.id, username: user.username, email: user.email },
-      process.env.JWT_SECRET!,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+      process.env.JWT_SECRET!
     );
 
     res.json({ user: { id: user.id, username: user.username, email: user.email, display_name: user.display_name, trash_talk_style: user.trash_talk_style }, token });

@@ -170,13 +170,17 @@ router.post('/trade-reaction', authenticate, async (req: AuthRequest, res: Respo
 
 // GET /api/ai/lineup-advice/:teamId/:week — Phase 2 placeholder
 router.get('/lineup-advice/:teamId/:week', authenticate, async (req: AuthRequest, res: Response) => {
-  const text = await generateLineupAdvice(req.params.teamId, parseInt(req.params.week));
+  const teamId = Array.isArray(req.params.teamId) ? req.params.teamId[0] : req.params.teamId;
+  const week = Array.isArray(req.params.week) ? parseInt(req.params.week[0]) : parseInt(req.params.week);
+  const text = await generateLineupAdvice(teamId, week);
   res.json({ text });
 });
 
 // GET /api/ai/waiver-recs/:leagueId/:week — Phase 3 placeholder
 router.get('/waiver-recs/:leagueId/:week', authenticate, async (req: AuthRequest, res: Response) => {
-  const text = await generateWaiverRecommendations(req.params.leagueId, parseInt(req.params.week));
+  const leagueId = Array.isArray(req.params.leagueId) ? req.params.leagueId[0] : req.params.leagueId;
+  const week = Array.isArray(req.params.week) ? parseInt(req.params.week[0]) : parseInt(req.params.week);
+  const text = await generateWaiverRecommendations(leagueId, week);
   res.json({ text });
 });
 

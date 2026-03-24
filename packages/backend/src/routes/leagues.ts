@@ -107,7 +107,7 @@ router.post('/:id/sync-sleeper', authenticate, async (req: AuthRequest, res: Res
 
 // GET /api/leagues/:id/matchups/:week
 router.get('/:id/matchups/:week', authenticate, async (req: AuthRequest, res: Response) => {
-  const week = parseInt(req.params.week);
+  const week = parseInt(Array.isArray(req.params.week) ? req.params.week[0] : req.params.week);
   const { rows } = await query(
     `SELECT m.*,
        ht.name as home_team_name, at.name as away_team_name,
@@ -128,7 +128,7 @@ router.post('/:id/import-matchups/:week', authenticate, async (req: AuthRequest,
   const { rows: [league] } = await query('SELECT * FROM leagues WHERE id = $1', [req.params.id]);
   if (!league?.sleeper_league_id) { res.status(400).json({ error: 'No Sleeper league ID linked' }); return; }
 
-  const week = parseInt(req.params.week);
+  const week = parseInt(Array.isArray(req.params.week) ? req.params.week[0] : req.params.week);
   const sleeperMatchups = await getSleeperMatchups(league.sleeper_league_id, week);
 
   // Group matchups by matchup_id
