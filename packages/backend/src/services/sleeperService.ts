@@ -11,6 +11,58 @@ const sleeper = axios.create({
 // =============================================
 // Sleeper API Types
 // =============================================
+
+/**
+ * Raw stat fields returned by Sleeper's weekly stats and projections endpoints.
+ * Only the fields relevant to fantasy scoring are listed explicitly;
+ * the index signature captures anything else Sleeper sends.
+ */
+export interface SleeperPlayerStats {
+  // Passing
+  pass_yd?: number;
+  pass_td?: number;
+  pass_int?: number;
+  pass_att?: number;
+  pass_cmp?: number;
+  pass_2pt?: number;
+  // Rushing
+  rush_yd?: number;
+  rush_td?: number;
+  rush_att?: number;
+  rush_2pt?: number;
+  // Receiving
+  rec?: number;
+  rec_yd?: number;
+  rec_td?: number;
+  rec_tgt?: number;
+  rec_2pt?: number;
+  // General
+  fum_lost?: number;
+  fum?: number;
+  // Kicking
+  fg_0_19?: number;
+  fg_20_29?: number;
+  fg_30_39?: number;
+  fg_40_49?: number;
+  fg_50p?: number;
+  xpt?: number;
+  xpt_miss?: number;
+  // Defense / ST
+  def_sack?: number;
+  def_int?: number;
+  def_fum_rec?: number;
+  def_td?: number;
+  def_st_td?: number;
+  def_safe?: number;
+  def_blk_kick?: number;
+  pts_allow?: number;
+  // Pre-calculated by Sleeper (not always present)
+  pts_ppr?: number;
+  pts_half_ppr?: number;
+  pts_std?: number;
+  // Catch-all
+  [key: string]: number | string | undefined;
+}
 export interface SleeperUser {
   user_id: string;
   username: string;
@@ -159,4 +211,40 @@ export async function syncPlayersFromSleeper(): Promise<void> {
 export async function getNFLState(): Promise<{ week: number; season: string; season_type: string }> {
   const { data } = await sleeper.get('/state/nfl');
   return data;
+}
+
+// =============================================
+// Weekly Stats & Projections
+// =============================================
+
+/**
+ * Fetch all player game stats for a given week from Sleeper.
+ * Returns a map of player_id → stats object.
+ * API: GET /stats/nfl/{season_type}/{season}/{week}
+ */
+export async function getSleeperStats(
+  season: number,
+  week: number,
+  seasonType = 'regular'
+): Promise<Record<string, SleeperPlayerStats>> {
+  const { data } = await sleeper.get<Record<string, SleeperPlayerStats>>(
+    `/stats/nfl/${seasonType}/${season}/${week}`
+  );
+  return data || {};
+}
+
+/**
+ * Fetch projected stats for a given week from Sleeper.
+ * Returns a map of player_id → projection object.
+ * API: GET /projections/nfl/{season_type}/{season}/{week}
+ */
+export async function getSleeperProjections(
+  season: number,
+  week: number,
+  seasonType = 'regular'
+): Promise<Record<string, SleeperPlayerStats>> {
+  const { data } = await sleeper.get<Record<string, SleeperPlayerStats>>(
+    `/projections/nfl/${seasonType}/${season}/${week}`
+  );
+  return data || {};
 }

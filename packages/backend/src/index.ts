@@ -12,6 +12,7 @@ import chatRouter from './routes/chat';
 import aiRouter from './routes/ai';
 import { errorHandler, notFound } from './middleware/errorHandler';
 import { validateEnv } from './config/startup';
+import { startScheduler } from './services/scheduler';
 
 dotenv.config();
 validateEnv();
@@ -85,6 +86,7 @@ app.use(errorHandler);
 // =============================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[NFL] Server listening on 0.0.0.0:${PORT} (${process.env.NODE_ENV || 'development'})`);
+  startScheduler();
 });
 
 export default app;
