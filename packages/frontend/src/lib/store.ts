@@ -50,7 +50,15 @@ interface LeagueState {
   setActiveLeague: (league: League | null) => void;
 }
 
-export const useLeagueStore = create<LeagueState>()((set) => ({
-  activeLeague: null,
-  setActiveLeague: (league) => set({ activeLeague: league }),
-}));
+export const useLeagueStore = create<LeagueState>()(
+  persist(
+    (set) => ({
+      activeLeague: null,
+      setActiveLeague: (league) => set({ activeLeague: league }),
+    }),
+    {
+      name: 'nfl-league',
+      partialize: (state) => ({ activeLeague: state.activeLeague }),
+    }
+  )
+);
