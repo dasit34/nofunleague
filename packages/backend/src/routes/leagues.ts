@@ -15,12 +15,15 @@ const router = Router();
 
 // =============================================
 // GET /api/leagues — list leagues for current user
+// Only returns leagues where the user is commissioner or has a team
 // =============================================
 router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
   const { rows } = await query(
-    `SELECT l.*, t.name as team_name
-     FROM leagues l
+    `SELECT l.*, t.name AS team_name
+     FROM   leagues l
      LEFT JOIN teams t ON t.league_id = l.id AND t.user_id = $1
+     WHERE  l.commissioner_id = $1
+        OR  t.id IS NOT NULL
      ORDER BY l.created_at DESC`,
     [req.user!.id]
   );

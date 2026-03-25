@@ -203,6 +203,12 @@ export const invites = {
 
   join: (code: string) =>
     request<{ message: string; league_id: string; team: unknown }>(`/api/invites/${code}/join`, { method: 'POST', body: '{}' }),
+
+  joinByCode: (code: string) =>
+    request<{ message: string; league_id: string; team: unknown }>('/api/leagues/join', { method: 'POST', body: JSON.stringify({ code }) }),
+
+  history: (leagueId: string) =>
+    request<unknown[]>(`/api/leagues/${leagueId}/invites`),
 };
 
 // =============================================

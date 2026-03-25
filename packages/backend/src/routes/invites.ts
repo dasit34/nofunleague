@@ -125,13 +125,13 @@ router.get('/invites/:code', optionalAuth, async (req: AuthRequest, res: Respons
 });
 
 // =============================================
-// POST /api/invites/:code/join
-// Authenticated user accepts invite and joins league
+// Shared join logic — used by both join endpoints
+// Must be called inside an active BEGIN block.
+// Validates the invite (with FOR UPDATE lock) and creates the team.
+// Returns the created team row or throws on any violation.
 // =============================================
-router.post('/invites/:code/join', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
-  const code = (req.params.code as string).toUpperCase();
-
-  // Re-validate invite with a row-level lock to prevent races
+async function acceptInvite(code: string, userId: string): Promise<{ invite: any; team: any }> {
+  // Lock the invite row for the duration of the transaction
   const { rows: [invite] } = await query(
     `SELECT li.*, l.name AS league_name, l.status AS league_status,
             COALESCE((l.settings->>'max_teams')::int, 12) AS max_teams
@@ -142,62 +142,55 @@ router.post('/invites/:code/join', authenticate, async (req: AuthRequest, res: R
     [code]
   );
 
-  if (!invite) { res.status(404).json({ error: 'Invite not found' }); return; }
-  if (!invite.is_active) { res.status(410).json({ error: 'This invite has been deactivated' }); return; }
-  if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
-    res.status(410).json({ error: 'This invite has expired' });
-    return;
-  }
-  if (invite.max_uses !== null && invite.uses >= invite.max_uses) {
-    res.status(410).json({ error: 'This invite has reached its maximum uses' });
-    return;
-  }
+  if (!invite) throw Object.assign(new Error('Invite not found'), { status: 404 });
+  if (!invite.is_active) throw Object.assign(new Error('This invite has been deactivated'), { status: 410 });
+  if (invite.expires_at && new Date(invite.expires_at) < new Date())
+    throw Object.assign(new Error('This invite has expired'), { status: 410 });
+  if (invite.max_uses !== null && invite.uses >= invite.max_uses)
+    throw Object.assign(new Error('This invite has reached its maximum uses'), { status: 410 });
 
-  // Already a member?
+  // Duplicate membership check
   const { rows: [existing] } = await query(
     'SELECT id FROM teams WHERE league_id = $1 AND user_id = $2',
-    [invite.league_id, req.user!.id]
+    [invite.league_id, userId]
   );
-  if (existing) {
-    res.status(409).json({ error: 'You are already in this league', league_id: invite.league_id });
-    return;
-  }
+  if (existing)
+    throw Object.assign(new Error('You are already in this league'), { status: 409, league_id: invite.league_id });
 
-  // League capacity check
+  // Capacity check
   const { rows: [{ team_count }] } = await query(
     'SELECT COUNT(*)::int AS team_count FROM teams WHERE league_id = $1',
     [invite.league_id]
   );
-  if (team_count >= invite.max_teams) {
-    res.status(409).json({ error: `This league is full (${invite.max_teams} teams max)` });
-    return;
-  }
+  if (team_count >= invite.max_teams)
+    throw Object.assign(new Error(`This league is full (${invite.max_teams} teams max)`), { status: 409 });
 
-  // Fetch user's display name for default team name
   const { rows: [user] } = await query(
     'SELECT display_name, username FROM users WHERE id = $1',
-    [req.user!.id]
+    [userId]
   );
-  const defaultTeamName = `${user.display_name || user.username}'s Team`;
+  const teamName = `${user.display_name || user.username}'s Team`;
 
+  const { rows: [team] } = await query(
+    `INSERT INTO teams (league_id, user_id, name) VALUES ($1, $2, $3) RETURNING *`,
+    [invite.league_id, userId, teamName]
+  );
+
+  await query('UPDATE league_invites SET uses = uses + 1 WHERE id = $1', [invite.id]);
+
+  return { invite, team };
+}
+
+// =============================================
+// POST /api/invites/:code/join   (code in URL)
+// POST /api/leagues/join          (code in body)
+// Authenticated user accepts invite and joins league
+// =============================================
+async function handleJoin(code: string, userId: string, res: Response): Promise<void> {
   await query('BEGIN');
   try {
-    // Create team
-    const { rows: [team] } = await query(
-      `INSERT INTO teams (league_id, user_id, name)
-       VALUES ($1, $2, $3)
-       RETURNING *`,
-      [invite.league_id, req.user!.id, defaultTeamName]
-    );
-
-    // Increment invite uses
-    await query(
-      `UPDATE league_invites SET uses = uses + 1 WHERE id = $1`,
-      [invite.id]
-    );
-
+    const { invite, team } = await acceptInvite(code, userId);
     await query('COMMIT');
-
     res.status(201).json({
       message: `Welcome to ${invite.league_name}!`,
       league_id: invite.league_id,
@@ -205,12 +198,55 @@ router.post('/invites/:code/join', authenticate, async (req: AuthRequest, res: R
     });
   } catch (err: any) {
     await query('ROLLBACK');
-    if (err.code === '23505') {
-      res.status(409).json({ error: 'You are already in this league' });
-    } else {
-      throw err;
-    }
+    const status = err.status || (err.code === '23505' ? 409 : 500);
+    const body: Record<string, unknown> = { error: err.message || 'Join failed' };
+    if (err.league_id) body.league_id = err.league_id;
+    res.status(status).json(body);
   }
+}
+
+router.post('/invites/:code/join', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
+  const code = (req.params.code as string).toUpperCase();
+  await handleJoin(code, req.user!.id, res);
+});
+
+// =============================================
+// POST /api/leagues/join
+// Body: { code: string }
+// =============================================
+router.post('/leagues/join', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
+  const code = (req.body.code as string | undefined)?.toUpperCase();
+  if (!code) { res.status(400).json({ error: 'code is required' }); return; }
+  await handleJoin(code, req.user!.id, res);
+});
+
+// =============================================
+// GET /api/leagues/:leagueId/invites
+// Commissioner — full invite history (all codes, active or not)
+// =============================================
+router.get('/leagues/:leagueId/invites', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
+  const leagueId = req.params.leagueId as string;
+
+  const { rows: [league] } = await query(
+    'SELECT commissioner_id FROM leagues WHERE id = $1',
+    [leagueId]
+  );
+  if (!league) { res.status(404).json({ error: 'League not found' }); return; }
+  if (league.commissioner_id !== req.user!.id) {
+    res.status(403).json({ error: 'Only the commissioner can view invite history' });
+    return;
+  }
+
+  const { rows } = await query(
+    `SELECT li.*, u.display_name AS created_by_name
+     FROM   league_invites li
+     JOIN   users u ON u.id = li.created_by
+     WHERE  li.league_id = $1
+     ORDER BY li.created_at DESC`,
+    [leagueId]
+  );
+
+  res.json(rows);
 });
 
 // =============================================
