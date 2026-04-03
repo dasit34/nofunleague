@@ -18,19 +18,28 @@ function handleUnauthenticated() {
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const url = `${API_BASE}${path}`;
   const token = getToken();
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    },
-  });
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      },
+    });
+  } catch (networkErr) {
+    // Network error, CORS failure, or DNS failure — fetch itself threw
+    const msg = (networkErr as Error).message || 'Network error';
+    console.error(`[API] ${options.method || 'GET'} ${url} → NETWORK ERROR: ${msg}`);
+    throw new Error(`Cannot reach server: ${msg}`);
+  }
 
   if (res.status === 401) {
     const body = await res.json().catch(() => ({ code: '' }));
-    // Only auto-logout on token problems, not wrong password attempts
     if (body.code === 'TOKEN_EXPIRED' || body.code === 'INVALID_TOKEN' || body.code === 'NO_TOKEN') {
       handleUnauthenticated();
       throw new Error('Session expired. Please sign in again.');
@@ -40,6 +49,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
+    console.error(`[API] ${options.method || 'GET'} ${url} → ${res.status}:`, err.error || err);
     const apiErr = Object.assign(new Error(err.error || `HTTP ${res.status}`), err);
     throw apiErr;
   }
