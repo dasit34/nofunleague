@@ -3,12 +3,16 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Enable SSL for any non-localhost connection (Railway, Render, Neon, etc.).
+// Local Docker postgres doesn't support SSL, so skip it for localhost/127.0.0.1.
+const isLocalDb = /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL ?? '');
+
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  ssl: isLocalDb ? false : { rejectUnauthorized: false },
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 10000,
 });
 
 export async function query(text: string, params?: unknown[]) {

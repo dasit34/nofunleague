@@ -209,6 +209,16 @@ router.post('/propose', authenticate, async (req: AuthRequest, res: Response) =>
     return;
   }
 
+  // Check lineup lock
+  const { rows: [leagueInfo] } = await query(
+    'SELECT week, lineup_locked_week FROM leagues WHERE id = $1',
+    [body.league_id]
+  );
+  if (leagueInfo && (leagueInfo.lineup_locked_week as number) >= (leagueInfo.week as number)) {
+    res.status(423).json({ error: `Lineups are locked for week ${leagueInfo.week}. Cannot propose trades.` });
+    return;
+  }
+
   // Check no player is already in an active trade in this league
   const allPlayerIds = [...body.proposing_player_ids, ...body.receiving_player_ids];
   const { rows: blocked } = await query(
@@ -313,11 +323,17 @@ router.post('/:id/approve', authenticate, async (req: AuthRequest, res: Response
   }
 
   const { rows: [league] } = await query(
-    'SELECT commissioner_id, week FROM leagues WHERE id = $1',
+    'SELECT commissioner_id, week, lineup_locked_week FROM leagues WHERE id = $1',
     [trade.league_id]
   );
   if (league.commissioner_id !== req.user!.id) {
     res.status(403).json({ error: 'Commissioner access required' });
+    return;
+  }
+
+  // Check lineup lock
+  if ((league.lineup_locked_week as number) >= (league.week as number)) {
+    res.status(423).json({ error: `Lineups are locked for week ${league.week}. Cannot execute trades.` });
     return;
   }
 
@@ -352,6 +368,22 @@ router.post('/:id/approve', authenticate, async (req: AuthRequest, res: Response
          VALUES ($1, $2, 'trade', $3, false, 'BN')
          ON CONFLICT (team_id, player_id) DO NOTHING`,
         [item.to_team_id, item.player_id, league.week]
+      );
+    }
+
+    // Log roster transactions for each swapped player
+    for (const item of items) {
+      await client.query(
+        `INSERT INTO roster_transactions (league_id, user_id, team_id, player_id, type, detail)
+         SELECT $1, t.user_id, $3, $4, 'add', $5
+         FROM teams t WHERE t.id = $3`,
+        [trade.league_id, null, item.to_team_id, item.player_id, `Acquired via trade`]
+      );
+      await client.query(
+        `INSERT INTO roster_transactions (league_id, user_id, team_id, player_id, type, detail)
+         SELECT $1, t.user_id, $3, $4, 'drop', $5
+         FROM teams t WHERE t.id = $3`,
+        [trade.league_id, null, item.from_team_id, item.player_id, `Traded away`]
       );
     }
 

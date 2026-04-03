@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 import { query } from '../config/database';
-import { syncPlayersFromSleeper, getSleeperRosters, getSleeperUsers, getSleeperLeague, getNFLState } from './sleeperService';
+import { syncPlayersFromSleeper, getSleeperRosters, getSleeperUsers, getSleeperLeague, getNFLState, syncNFLSchedule } from './sleeperService';
 import { syncPlayerStats } from './statsService';
 
 // =============================================
@@ -264,10 +264,25 @@ export function startScheduler(): void {
     runLeagueRostersSync('scheduled').catch(() => { /* already logged */ });
   }, { timezone: 'UTC' });
 
+  // NFL schedule sync for the upcoming week — Wednesday 08:00 UTC
+  // Schedules for the next week are typically published by Wednesday.
+  cron.schedule('0 8 * * 3', async () => {
+    console.log('[scheduler] [scheduled] Starting NFL schedule sync...');
+    try {
+      const state = await getNFLState();
+      const season = parseInt(state.season, 10);
+      const stored = await syncNFLSchedule(season, state.week, state.season_type || 'regular');
+      console.log(`[scheduler] [scheduled] NFL schedule sync complete — ${stored} games`);
+    } catch (err) {
+      console.error('[scheduler] [scheduled] NFL schedule sync failed:', err);
+    }
+  }, { timezone: 'UTC' });
+
   console.log(
     '[scheduler] Jobs registered (UTC): ' +
     'player master (daily 02:00), ' +
     'player stats (Tue 04:00), ' +
-    'league rosters (Tue 06:00)'
+    'league rosters (Tue 06:00), ' +
+    'NFL schedule (Wed 08:00)'
   );
 }

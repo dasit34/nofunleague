@@ -24,6 +24,11 @@ export interface League {
   settings: Record<string, unknown>;
   ai_enabled: boolean;
   chaos_mode: boolean;
+  league_size: number;
+  scoring_type: 'standard' | 'half_ppr' | 'ppr';
+  invite_code?: string;
+  lineup_locked_week: number;
+  scoring_source: 'mock' | 'real';
   created_at: string;
   teams?: Team[];
   team_name?: string; // current user's team name
@@ -65,9 +70,18 @@ export interface Player {
 }
 
 export interface RosterPlayer extends Player {
-  roster_slot: string;
+  roster_slot: string | null;
   is_starter: boolean;
   acquisition_type: string;
+}
+
+export interface AvailablePlayer {
+  id: string;
+  full_name: string;
+  position: string;
+  nfl_team: string;
+  status: string;
+  injury_status?: string;
 }
 
 export interface Matchup {
@@ -81,6 +95,7 @@ export interface Matchup {
   winner_team_id?: string;
   is_playoffs: boolean;
   is_complete: boolean;
+  scoring_source?: 'mock' | 'real' | null;
   home_team_name?: string;
   away_team_name?: string;
   home_owner?: string;
@@ -242,6 +257,46 @@ export interface DraftAvailablePlayer {
 export interface ApiResponse<T> {
   data?: T;
   error?: string;
+}
+
+export interface LeagueMember {
+  id: string;
+  role: 'commissioner' | 'member';
+  created_at: string;
+  user_id: string;
+  username: string;
+  display_name: string;
+  avatar_url?: string;
+}
+
+export interface Transaction {
+  id: string;
+  type: 'add' | 'drop' | 'move';
+  detail: string | null;
+  created_at: string;
+  user_name: string;
+  username: string;
+  team_name: string;
+  player_name: string;
+  player_position: string;
+  player_nfl_team: string;
+}
+
+export interface WaiverClaim {
+  id: string;
+  league_id: string;
+  team_id: string;
+  player_id: string;
+  week: number;
+  status: 'pending' | 'approved' | 'rejected';
+  processed_at: string | null;
+  created_at: string;
+  team_name?: string;
+  user_name?: string;
+  player_name?: string;
+  player_position?: string;
+  player_nfl_team?: string;
+  waiver_priority?: number;
 }
 
 export type TrashTalkStyle = 'aggressive' | 'petty' | 'poetic' | 'silent';

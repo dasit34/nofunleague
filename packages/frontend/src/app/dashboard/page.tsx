@@ -82,9 +82,11 @@ export default function DashboardPage() {
                       <h3 className="text-white font-black text-lg group-hover:text-gold transition-colors">
                         {league.name}
                       </h3>
-                      {league.team_name && (
+                      {league.commissioner_id === user?.id ? (
+                        <p className="text-gold/70 text-xs font-semibold uppercase tracking-wide">Commissioner</p>
+                      ) : league.team_name ? (
                         <p className="text-white/50 text-sm">{league.team_name}</p>
-                      )}
+                      ) : null}
                     </div>
                     <span className={`badge ${
                       league.status === 'in_season'

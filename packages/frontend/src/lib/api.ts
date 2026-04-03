@@ -1,6 +1,8 @@
-import type { User, Trade } from '@/types';
+import type { User, Trade, RosterPlayer, AvailablePlayer, Transaction, WaiverClaim } from '@/types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// Empty string → relative paths → Next.js dev proxy routes to localhost:3001 (no CORS).
+// In production, set NEXT_PUBLIC_API_URL to the full backend URL (e.g. Railway).
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 function getToken(): string | null {
   if (typeof window === 'undefined') return null;
@@ -38,7 +40,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || `HTTP ${res.status}`);
+    const apiErr = Object.assign(new Error(err.error || `HTTP ${res.status}`), err);
+    throw apiErr;
   }
 
   return res.json();
@@ -102,10 +105,16 @@ export const auth = {
 export const leagues = {
   list: () => request<unknown[]>('/api/leagues'),
 
-  create: (data: { name: string; sleeper_league_id?: string; season?: number }) =>
+  create: (data: { name: string; sleeper_league_id?: string; season?: number; league_size?: number; scoring_type?: string; scoring_source?: string }) =>
     request<unknown>('/api/leagues', { method: 'POST', body: JSON.stringify(data) }),
 
   get: (id: string) => request<unknown>(`/api/leagues/${id}`),
+
+  join: (invite_code: string) =>
+    request<{ message: string; league_id: string; role: string }>('/api/leagues/join', {
+      method: 'POST',
+      body: JSON.stringify({ invite_code }),
+    }),
 
   syncSleeper: (id: string) =>
     request<{ message: string; week: number; scoring_format: string; synced_rosters: number; linked_users: number }>(
@@ -119,12 +128,69 @@ export const leagues = {
 
   importMatchups: (id: string, week: number) =>
     request<{ message: string; imported: number }>(`/api/leagues/${id}/import-matchups/${week}`, { method: 'POST' }),
+
+  generateSchedule: (id: string, weeks?: number) =>
+    request<{ message: string; matchups_created: number; weeks_skipped: number }>(
+      `/api/leagues/${id}/generate-schedule${weeks ? `?weeks=${weeks}` : ''}`,
+      { method: 'POST' }
+    ),
+
+  simulateWeek: (id: string) =>
+    request<{ message: string; week: number; scoring_source: string; matchups_scored: number; next_week: number }>(
+      `/api/leagues/${id}/simulate-week`, { method: 'POST' }
+    ),
+
+  scoreWeek: (id: string) =>
+    request<{ message: string; week: number; scoring_source: string; matchups_scored: number; next_week: number }>(
+      `/api/leagues/${id}/score-week`, { method: 'POST' }
+    ),
+
+  syncStats: (season: number, week: number) =>
+    request<{ season: number; week: number; synced: number; skipped: number; errors: number }>(
+      '/api/players/sync-stats', { method: 'POST', body: JSON.stringify({ season, week }) }
+    ),
+
+  debugWeek: (week: number, season?: number) =>
+    request<{ stats_loaded: boolean; total_player_stats: number; top_players: unknown[] }>(
+      `/api/players/debug/week/${week}${season ? `?season=${season}` : ''}`
+    ),
+
+  unlockLineup: (id: string) =>
+    request<{ message: string; lineup_locked_week: number }>(
+      `/api/leagues/${id}/unlock-lineup`, { method: 'POST' }
+    ),
+
+  transactions: (id: string, limit?: number) =>
+    request<Transaction[]>(`/api/leagues/${id}/transactions${limit ? `?limit=${limit}` : ''}`),
+
+  waiverClaim: (leagueId: string, player_id: string) =>
+    request<{ message: string; claim: WaiverClaim }>(`/api/leagues/${leagueId}/waivers/claim`, {
+      method: 'POST', body: JSON.stringify({ player_id }),
+    }),
+
+  waiverCancel: (leagueId: string, claimId: string) =>
+    request<{ message: string }>(`/api/leagues/${leagueId}/waivers/claim/${claimId}`, {
+      method: 'DELETE',
+    }),
+
+  waiverList: (leagueId: string, status?: string) =>
+    request<WaiverClaim[]>(`/api/leagues/${leagueId}/waivers${status ? `?status=${status}` : ''}`),
+
+  waiverMyClaims: (leagueId: string) =>
+    request<WaiverClaim[]>(`/api/leagues/${leagueId}/waivers/my-claims`),
+
+  waiverProcess: (leagueId: string) =>
+    request<{ message: string; approved: number; rejected: number }>(
+      `/api/leagues/${leagueId}/waivers/process`, { method: 'POST' }
+    ),
 };
 
 // =============================================
 // Teams
 // =============================================
 export const teams = {
+  create: (data: { league_id: string; name: string }) =>
+    request<unknown>('/api/teams', { method: 'POST', body: JSON.stringify(data) }),
   get: (id: string) => request<unknown>(`/api/teams/${id}`),
   scores: (id: string) => request<unknown[]>(`/api/teams/${id}/scores`),
   matchupHistory: (id: string) => request<unknown[]>(`/api/teams/${id}/matchup-history`),
@@ -133,13 +199,37 @@ export const teams = {
       method: 'PATCH',
       body: JSON.stringify({ starters }),
     }),
+  setSlot: (teamId: string, player_id: string, slot: string) =>
+    request<{ message: string; roster: RosterPlayer[] }>(`/api/teams/${teamId}/roster/slot`, {
+      method: 'PATCH',
+      body: JSON.stringify({ player_id, slot }),
+    }),
+  available: (teamId: string, params?: { position?: string; search?: string; limit?: number }) => {
+    const qs = new URLSearchParams(params as Record<string, string>).toString();
+    return request<AvailablePlayer[]>(`/api/teams/${teamId}/available${qs ? `?${qs}` : ''}`);
+  },
+  lineupLock: (id: string) =>
+    request<{ locked_player_ids: string[]; locked_players: { id: string; name: string; nfl_team: string; game_start: string }[] }>(
+      `/api/teams/${id}/lineup-lock`
+    ),
+
+  addPlayer: (teamId: string, player_id: string) =>
+    request<{ message: string; player_id: string; roster_slot: string | null }>(`/api/teams/${teamId}/add`, {
+      method: 'POST',
+      body: JSON.stringify({ player_id }),
+    }),
+
+  dropPlayer: (teamId: string, player_id: string) =>
+    request<{ message: string; player_id: string }>(`/api/teams/${teamId}/drop/${player_id}`, {
+      method: 'DELETE',
+    }),
 };
 
 // =============================================
 // Players
 // =============================================
 export const players = {
-  list: (params?: { position?: string; team?: string; search?: string; limit?: number }) => {
+  list: (params?: { position?: string; team?: string; search?: string; limit?: number; league_id?: string }) => {
     const qs = new URLSearchParams(params as Record<string, string>).toString();
     return request<unknown[]>(`/api/players${qs ? `?${qs}` : ''}`);
   },

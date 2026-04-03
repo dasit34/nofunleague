@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate } from '../middleware/auth';
+import { authenticate, AuthRequest } from '../middleware/auth';
 import { syncPlayersFromSleeper, getNFLState } from '../services/sleeperService';
 import {
   syncPlayerStats,
@@ -21,17 +21,43 @@ const router = Router();
 // ─────────────────────────────────────────────────────────────
 
 // GET /api/players — search / filter players
+// Optional: league_id — if provided, each row gains on_team_id + on_team_name
+// showing which team in that league owns the player (null = free agent).
 router.get('/', async (req: Request, res: Response) => {
-  const { position, team, search, limit = '50', offset = '0' } = req.query;
+  const { position, team, search, league_id, limit = '50', offset = '0' } = req.query;
 
-  let sql = 'SELECT * FROM players WHERE 1=1';
   const params: unknown[] = [];
+  const where: string[] = ['1=1'];
 
-  if (position) { sql += ` AND position = $${params.length + 1}`;      params.push(position); }
-  if (team)     { sql += ` AND nfl_team = $${params.length + 1}`;      params.push(team); }
-  if (search)   { sql += ` AND full_name ILIKE $${params.length + 1}`; params.push(`%${search}%`); }
+  if (position) { params.push(position);         where.push(`p.position = $${params.length}`); }
+  if (team)     { params.push(team);             where.push(`p.nfl_team = $${params.length}`); }
+  if (search)   { params.push(`%${search}%`);   where.push(`p.full_name ILIKE $${params.length}`); }
 
-  sql += ` ORDER BY full_name LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+  let sql: string;
+  if (league_id) {
+    params.push(league_id);
+    const lgParam = params.length;
+    // Subquery scopes the roster join to this league only — prevents duplicate
+    // rows when a player appears in multiple leagues' rosters.
+    sql = `
+      SELECT p.*,
+             rt.team_id AS on_team_id,
+             rt.name    AS on_team_name
+      FROM   players p
+      LEFT JOIN (
+        SELECT r.player_id, r.team_id, t.name
+        FROM   rosters r
+        JOIN   teams t ON t.id = r.team_id AND t.league_id = $${lgParam}
+      ) rt ON rt.player_id = p.id
+      WHERE  ${where.join(' AND ')}
+      ORDER BY p.full_name
+      LIMIT  $${params.length + 1} OFFSET $${params.length + 2}`;
+  } else {
+    sql = `SELECT * FROM players p WHERE ${where.join(' AND ')}
+           ORDER BY p.full_name
+           LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+  }
+
   params.push(parseInt(limit as string), parseInt(offset as string));
 
   const { rows } = await query(sql, params);
@@ -79,10 +105,28 @@ router.get('/stats/:season/:week', async (req: Request, res: Response) => {
 });
 
 // POST /api/players/sync — sync player master data from Sleeper (authenticated)
-router.post('/sync', authenticate, async (_req, res: Response) => {
-  await syncPlayersFromSleeper();
-  const { rows: [{ count }] } = await query('SELECT COUNT(*) FROM players');
-  res.json({ message: 'Player sync complete', total: parseInt(count) });
+// The sync can take 2-4 minutes for a remote DB, so we fire-and-forget unless ?wait=true.
+router.post('/sync', authenticate, async (req: AuthRequest, res: Response) => {
+  const wait = req.query.wait === 'true';
+
+  if (wait) {
+    // Blocking mode: wait for sync to complete (may time out on slow connections)
+    try {
+      const synced = await syncPlayersFromSleeper();
+      const { rows: [{ count }] } = await query('SELECT COUNT(*) FROM players');
+      res.json({ message: 'Player sync complete', synced, total: parseInt(count) });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Sync failed';
+      console.error('[players/sync] Error:', msg);
+      res.status(502).json({ error: `Sleeper sync failed: ${msg}` });
+    }
+  } else {
+    // Fire-and-forget: respond immediately, sync in background
+    res.json({ message: 'Player sync started in background. Check /api/players?limit=1 to verify.' });
+    syncPlayersFromSleeper().catch((err) => {
+      console.error('[players/sync] Background sync failed:', (err as Error).message);
+    });
+  }
 });
 
 // POST /api/players/sync-stats — sync game stats for a specific season/week
@@ -145,6 +189,71 @@ router.post('/score', async (req: Request, res: Response) => {
   const settings: ScoringSettings = { ...base, ...(scoring || {}) };
 
   res.json({ fantasy_points: calculateFantasyPoints(stats, settings), settings_used: settings });
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/players/debug/week/:week — debug endpoint showing stats + computed fantasy points
+// Query: ?season=2024&scoring=ppr&limit=20
+// ─────────────────────────────────────────────────────────────
+router.get('/debug/week/:week', async (req: Request, res: Response) => {
+  const week = parseInt(req.params.week as string);
+  const season = parseInt((req.query.season as string) || '2024');
+  const scoring = (req.query.scoring as string) || 'ppr';
+  const limit = parseInt((req.query.limit as string) || '20');
+
+  if (isNaN(week)) { res.status(400).json({ error: 'week must be an integer' }); return; }
+
+  const col = scoring === 'std' ? 'fantasy_pts_std' : scoring === 'half' ? 'fantasy_pts_half' : 'fantasy_pts_ppr';
+
+  const { rows: [statsInfo] } = await query(
+    `SELECT COUNT(*)::int AS total_players,
+            MIN(last_synced_at) AS earliest_sync,
+            MAX(last_synced_at) AS latest_sync
+     FROM player_stats WHERE season = $1 AND week = $2 AND season_type = 'regular'`,
+    [season, week]
+  );
+
+  const { rows: topPlayers } = await query(
+    `SELECT ps.player_id, p.full_name, p.position, p.nfl_team,
+            ps.fantasy_pts_std, ps.fantasy_pts_half, ps.fantasy_pts_ppr,
+            ps.stats,
+            ps.last_synced_at
+     FROM player_stats ps
+     JOIN players p ON p.id = ps.player_id
+     WHERE ps.season = $1 AND ps.week = $2 AND ps.season_type = 'regular'
+     ORDER BY ps.${col} DESC NULLS LAST
+     LIMIT $3`,
+    [season, week, limit]
+  );
+
+  // Extract key stat fields for readability
+  const players = topPlayers.map((r) => {
+    const s = r.stats as Record<string, number> || {};
+    return {
+      player_id: r.player_id,
+      name: r.full_name,
+      position: r.position,
+      nfl_team: r.nfl_team,
+      fantasy_pts: { std: parseFloat(r.fantasy_pts_std), half: parseFloat(r.fantasy_pts_half), ppr: parseFloat(r.fantasy_pts_ppr) },
+      key_stats: {
+        pass_yd: s.pass_yd || 0, pass_td: s.pass_td || 0, pass_int: s.pass_int || 0,
+        rush_yd: s.rush_yd || 0, rush_td: s.rush_td || 0,
+        rec: s.rec || 0, rec_yd: s.rec_yd || 0, rec_td: s.rec_td || 0,
+        fum_lost: s.fum_lost || 0,
+      },
+      synced_at: r.last_synced_at,
+    };
+  });
+
+  res.json({
+    season,
+    week,
+    scoring_format: scoring,
+    stats_loaded: (statsInfo.total_players as number) > 0,
+    total_player_stats: statsInfo.total_players,
+    sync_window: { earliest: statsInfo.earliest_sync, latest: statsInfo.latest_sync },
+    top_players: players,
+  });
 });
 
 // ─────────────────────────────────────────────────────────────

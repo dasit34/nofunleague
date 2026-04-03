@@ -10,6 +10,7 @@ import {
   getSleeperMatchups,
   getNFLState,
 } from '../services/sleeperService';
+import { scoreWeekReal } from '../services/scoringService';
 
 const router = Router();
 
@@ -19,12 +20,14 @@ const router = Router();
 // =============================================
 router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
   const { rows } = await query(
-    `SELECT l.*, t.name AS team_name
+    `SELECT DISTINCT ON (l.id) l.*, t.name AS team_name
      FROM   leagues l
      LEFT JOIN teams t ON t.league_id = l.id AND t.user_id = $1
+     LEFT JOIN league_members lm ON lm.league_id = l.id AND lm.user_id = $1
      WHERE  l.commissioner_id = $1
         OR  t.id IS NOT NULL
-     ORDER BY l.created_at DESC`,
+        OR  lm.id IS NOT NULL
+     ORDER BY l.id, l.created_at DESC`,
     [req.user!.id]
   );
   res.json(rows);
@@ -35,40 +38,146 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
 // =============================================
 router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
   const Schema = z.object({
-    name:             z.string().min(1).max(100),
+    name:              z.string().min(1).max(100),
     sleeper_league_id: z.string().optional(),
-    season:           z.number().optional(),
-    ai_enabled:       z.boolean().optional(),
+    season:            z.number().optional(),
+    ai_enabled:        z.boolean().optional(),
+    league_size:       z.number().int().min(4).max(16).optional(),
+    scoring_type:      z.enum(['standard', 'half_ppr', 'ppr']).optional(),
+    scoring_source:    z.enum(['mock', 'real']).optional(),
   });
 
   const body = Schema.parse(req.body);
+
+  // Generate a simple unique invite code
+  const inviteCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+
   const { rows } = await query(
-    `INSERT INTO leagues (name, commissioner_id, sleeper_league_id, season, ai_enabled)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO leagues (name, commissioner_id, sleeper_league_id, season, ai_enabled, league_size, scoring_type, invite_code, scoring_source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [body.name, req.user!.id, body.sleeper_league_id || null, body.season || 2025, body.ai_enabled ?? true]
+    [
+      body.name,
+      req.user!.id,
+      body.sleeper_league_id || null,
+      body.season || 2025,
+      body.ai_enabled ?? true,
+      body.league_size ?? 10,
+      body.scoring_type ?? 'half_ppr',
+      inviteCode,
+      body.scoring_source ?? 'mock',
+    ]
   );
+
+  // Auto-add commissioner as a league member
+  await query(
+    `INSERT INTO league_members (user_id, league_id, role) VALUES ($1, $2, 'commissioner')
+     ON CONFLICT DO NOTHING`,
+    [req.user!.id, rows[0].id]
+  );
+
   res.status(201).json(rows[0]);
 });
 
 // =============================================
-// GET /api/leagues/:id — league details with teams
+// POST /api/leagues/join — join a league by invite code
+// =============================================
+router.post('/join', authenticate, async (req: AuthRequest, res: Response) => {
+  const Schema = z.object({
+    invite_code: z.string().min(1),
+  });
+
+  let body: z.infer<typeof Schema>;
+  try {
+    body = Schema.parse(req.body);
+  } catch {
+    res.status(400).json({ error: 'invite_code is required' });
+    return;
+  }
+
+  const { rows: [league] } = await query(
+    'SELECT * FROM leagues WHERE invite_code = $1',
+    [body.invite_code.toUpperCase()]
+  );
+
+  if (!league) {
+    res.status(404).json({ error: 'Invalid invite code. No league found.' });
+    return;
+  }
+
+  // Check if already a member
+  const { rows: [existing] } = await query(
+    'SELECT id, role FROM league_members WHERE user_id = $1 AND league_id = $2',
+    [req.user!.id, league.id]
+  );
+
+  if (existing) {
+    res.json({ message: 'Already a member', league_id: league.id, role: existing.role });
+    return;
+  }
+
+  // Check league capacity
+  const { rows: [{ count }] } = await query(
+    'SELECT COUNT(*)::int AS count FROM league_members WHERE league_id = $1',
+    [league.id]
+  );
+  if (league.league_size && count >= league.league_size) {
+    res.status(400).json({ error: 'This league is full' });
+    return;
+  }
+
+  // Add membership
+  await query(
+    `INSERT INTO league_members (user_id, league_id, role) VALUES ($1, $2, 'member')
+     ON CONFLICT DO NOTHING`,
+    [req.user!.id, league.id]
+  );
+
+  // Auto-create a team for the user if they don't have one
+  const { rows: [existingTeam] } = await query(
+    'SELECT id FROM teams WHERE league_id = $1 AND user_id = $2',
+    [league.id, req.user!.id]
+  );
+  let team = existingTeam;
+  if (!team) {
+    const { rows: [newTeam] } = await query(
+      `INSERT INTO teams (league_id, user_id, name)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (league_id, user_id) DO NOTHING
+       RETURNING *`,
+      [league.id, req.user!.id, `${req.user!.username}'s Team`]
+    );
+    team = newTeam;
+  }
+
+  res.status(201).json({ message: 'Joined league successfully', league_id: league.id, role: 'member', team_id: team?.id });
+});
+
+// =============================================
+// GET /api/leagues/:id — league details with teams and members
 // Only accessible to commissioner or league members
 // =============================================
 router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   const { rows: [league] } = await query('SELECT * FROM leagues WHERE id = $1', [req.params.id]);
   if (!league) { res.status(404).json({ error: 'League not found' }); return; }
 
-  // Authorization: commissioner or member (has a team in this league)
+  // Authorization: commissioner or league member
   const isCommissioner = league.commissioner_id === req.user!.id;
   if (!isCommissioner) {
     const { rows: [membership] } = await query(
-      'SELECT id FROM teams WHERE league_id = $1 AND user_id = $2',
+      'SELECT id FROM league_members WHERE league_id = $1 AND user_id = $2',
       [league.id, req.user!.id]
     );
+    // Fallback: also check teams table for legacy membership
     if (!membership) {
-      res.status(403).json({ error: 'You are not a member of this league' });
-      return;
+      const { rows: [teamMembership] } = await query(
+        'SELECT id FROM teams WHERE league_id = $1 AND user_id = $2',
+        [league.id, req.user!.id]
+      );
+      if (!teamMembership) {
+        res.status(403).json({ error: 'You are not a member of this league' });
+        return;
+      }
     }
   }
 
@@ -81,8 +190,212 @@ router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
     [req.params.id]
   );
 
-  res.json({ ...league, teams });
+  const { rows: members } = await query(
+    `SELECT lm.id, lm.role, lm.created_at,
+            u.id AS user_id, u.username, u.display_name, u.avatar_url
+     FROM league_members lm
+     JOIN users u ON u.id = lm.user_id
+     WHERE lm.league_id = $1
+     ORDER BY lm.role = 'commissioner' DESC, lm.created_at ASC`,
+    [req.params.id]
+  );
+
+  res.json({ ...league, teams, members });
 });
+
+// =============================================
+// GET /api/leagues/:id/transactions — recent roster transactions
+// =============================================
+router.get('/:id/transactions', authenticate, async (req: AuthRequest, res: Response) => {
+  const limit = parseInt((req.query.limit as string) || '20');
+  const { rows } = await query(
+    `SELECT rt.id, rt.type, rt.detail, rt.created_at,
+            u.display_name AS user_name, u.username,
+            t.name AS team_name,
+            p.full_name AS player_name, p.position AS player_position, p.nfl_team AS player_nfl_team
+     FROM roster_transactions rt
+     LEFT JOIN users u ON u.id = rt.user_id
+     LEFT JOIN teams t ON t.id = rt.team_id
+     LEFT JOIN players p ON p.id = rt.player_id
+     WHERE rt.league_id = $1
+     ORDER BY rt.created_at DESC
+     LIMIT $2`,
+    [req.params.id, limit]
+  );
+  res.json(rows);
+});
+
+// =============================================
+// POST /api/leagues/:id/simulate-week — score a week of matchups
+// Commissioner only.
+// For "real" leagues: uses player_stats. Falls back to mock if no stats.
+// For "mock" leagues: always uses random scoring.
+// Query: ?force=mock to override real leagues.
+// =============================================
+router.post('/:id/simulate-week', authenticate, requireCommissioner, async (req: AuthRequest, res: Response) => {
+  try {
+    const { rows: [league] } = await query('SELECT * FROM leagues WHERE id = $1', [req.params.id]);
+    if (!league) { res.status(404).json({ error: 'League not found' }); return; }
+    if (league.status !== 'in_season') {
+      res.status(400).json({ error: 'League must be in_season to simulate' });
+      return;
+    }
+
+    const week = league.week as number;
+    const season = league.season as number;
+    const forceMode = req.query.force as string | undefined;
+    const leagueMode = league.scoring_source as string || 'mock';
+
+    // Determine scoring mode: real leagues try real stats first
+    let useReal = leagueMode === 'real' && forceMode !== 'mock';
+
+    if (useReal) {
+      // Check that stats exist for this week
+      const { rows: [statsCheck] } = await query(
+        `SELECT COUNT(*)::int AS cnt FROM player_stats WHERE season = $1 AND week = $2 AND season_type = 'regular'`,
+        [season, week]
+      );
+      if ((statsCheck.cnt as number) === 0) {
+        console.warn(`[scoring] No stats for ${season} week ${week} — falling back to mock`);
+        useReal = false;
+      }
+    }
+
+    // Lock lineups before scoring
+    await query(
+      'UPDATE leagues SET lineup_locked_week = GREATEST(lineup_locked_week, $2), updated_at = NOW() WHERE id = $1',
+      [req.params.id, week]
+    );
+
+    // Get matchups for this week
+    const { rows: matchups } = await query(
+      `SELECT * FROM matchups WHERE league_id = $1 AND week = $2 AND is_complete = FALSE`,
+      [req.params.id, week]
+    );
+    if (matchups.length === 0) {
+      res.status(400).json({ error: `No unplayed matchups for week ${week}. Schedule may not be generated yet.` });
+      return;
+    }
+
+    let scored = 0;
+    const scoringSource = useReal ? 'real' : 'mock';
+
+    if (useReal) {
+      // Real scoring via scoringService
+      const result = await scoreWeekReal(req.params.id as string, week);
+      scored = result.scored;
+    } else {
+      // Mock scoring — random points
+      for (const matchup of matchups) {
+        const homeScore = await calculateMockTeamScore(matchup.home_team_id);
+        const awayScore = await calculateMockTeamScore(matchup.away_team_id);
+
+        let winnerId: string | null = null;
+        if (homeScore > awayScore) winnerId = matchup.home_team_id;
+        else if (awayScore > homeScore) winnerId = matchup.away_team_id;
+
+        await query(
+          `UPDATE matchups
+           SET home_score = $1, away_score = $2, winner_team_id = $3, is_complete = TRUE,
+               scoring_source = 'mock', updated_at = NOW()
+           WHERE id = $4`,
+          [homeScore, awayScore, winnerId, matchup.id]
+        );
+
+        if (winnerId) {
+          const loserId = winnerId === matchup.home_team_id ? matchup.away_team_id : matchup.home_team_id;
+          await query('UPDATE teams SET wins = wins + 1, updated_at = NOW() WHERE id = $1', [winnerId]);
+          await query('UPDATE teams SET losses = losses + 1, updated_at = NOW() WHERE id = $1', [loserId]);
+        } else {
+          await query('UPDATE teams SET ties = ties + 1, updated_at = NOW() WHERE id = $1', [matchup.home_team_id]);
+          await query('UPDATE teams SET ties = ties + 1, updated_at = NOW() WHERE id = $1', [matchup.away_team_id]);
+        }
+
+        await query(
+          'UPDATE teams SET points_for = points_for + $2, points_against = points_against + $3, updated_at = NOW() WHERE id = $1',
+          [matchup.home_team_id, homeScore, awayScore]
+        );
+        await query(
+          'UPDATE teams SET points_for = points_for + $2, points_against = points_against + $3, updated_at = NOW() WHERE id = $1',
+          [matchup.away_team_id, awayScore, homeScore]
+        );
+
+        scored++;
+      }
+    }
+
+    // Advance league week
+    await query(
+      'UPDATE leagues SET week = week + 1, updated_at = NOW() WHERE id = $1',
+      [req.params.id]
+    );
+
+    res.json({
+      message: `Week ${week} scored (${scoringSource})`,
+      week,
+      scoring_source: scoringSource,
+      matchups_scored: scored,
+      next_week: week + 1,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Scoring failed';
+    res.status(500).json({ error: msg });
+  }
+});
+
+// =============================================
+// POST /api/leagues/:id/unlock-lineup — commissioner unlocks current week
+// =============================================
+router.post('/:id/unlock-lineup', authenticate, requireCommissioner, async (req: AuthRequest, res: Response) => {
+  const { rows: [league] } = await query('SELECT id, week, lineup_locked_week FROM leagues WHERE id = $1', [req.params.id]);
+  if (!league) { res.status(404).json({ error: 'League not found' }); return; }
+
+  // Unlock by setting locked week to one less than current week
+  const newLockedWeek = Math.max(0, (league.week as number) - 1);
+  await query(
+    'UPDATE leagues SET lineup_locked_week = $2, updated_at = NOW() WHERE id = $1',
+    [req.params.id, newLockedWeek]
+  );
+
+  res.json({ message: `Lineups unlocked for week ${league.week}`, lineup_locked_week: newLockedWeek });
+});
+
+/**
+ * Calculate a mock team score by giving each starter a random score (5-25 pts).
+ * Returns the total. If the team has no starters, gives a baseline random score.
+ */
+async function calculateMockTeamScore(teamId: string): Promise<number> {
+  const { rows: starters } = await query(
+    `SELECT r.player_id, r.roster_slot, p.position
+     FROM rosters r
+     JOIN players p ON p.id = r.player_id
+     WHERE r.team_id = $1 AND r.is_starter = TRUE`,
+    [teamId]
+  );
+
+  if (starters.length === 0) {
+    // Fallback: count all rostered players and give them random scores
+    const { rows: allPlayers } = await query(
+      'SELECT player_id FROM rosters WHERE team_id = $1',
+      [teamId]
+    );
+    if (allPlayers.length === 0) return Math.round((60 + Math.random() * 80) * 100) / 100;
+    let total = 0;
+    for (const _ of allPlayers) {
+      total += 5 + Math.random() * 20;
+    }
+    return Math.round(total * 100) / 100;
+  }
+
+  let total = 0;
+  for (const starter of starters) {
+    // QB tends to score higher, randomize by position
+    const base = starter.position === 'QB' ? 12 : starter.position === 'K' ? 4 : 5;
+    const range = starter.position === 'QB' ? 18 : starter.position === 'K' ? 12 : 20;
+    total += base + Math.random() * range;
+  }
+  return Math.round(total * 100) / 100;
+}
 
 // =============================================
 // PATCH /api/leagues/:id — commissioner updates week or status
@@ -320,6 +633,15 @@ router.post('/:id/import-matchups/:week', authenticate, requireCommissioner, asy
       if (homeScore > awayScore)      winnerId = homeTeam.id;
       else if (awayScore > homeScore) winnerId = awayTeam.id;
 
+      // Check if this matchup was already finalized so we don't double-count stats
+      const { rows: [existing] } = await query(
+        `SELECT is_complete FROM matchups
+         WHERE league_id = $1 AND week = $2
+           AND home_team_id = $3 AND away_team_id = $4`,
+        [league.id, week, homeTeam.id, awayTeam.id]
+      );
+      const alreadyComplete = existing?.is_complete === true;
+
       // Upsert matchup with winner and completion flag
       await query(
         `INSERT INTO matchups
@@ -373,6 +695,29 @@ router.post('/:id/import-matchups/:week', authenticate, requireCommissioner, asy
          await resolvePlayerId(awayTopId), await resolvePlayerId(awayBustId)]
       );
 
+      // Only update team stats on first completion — prevents double-counting on re-import
+      if (!alreadyComplete) {
+        if (winnerId) {
+          const loserId = winnerId === homeTeam.id ? awayTeam.id : homeTeam.id;
+          await query(`UPDATE teams SET wins   = wins   + 1, updated_at = NOW() WHERE id = $1`, [winnerId]);
+          await query(`UPDATE teams SET losses = losses + 1, updated_at = NOW() WHERE id = $1`, [loserId]);
+        }
+        await query(
+          `UPDATE teams SET points_for     = points_for     + $2,
+                            points_against = points_against + $3,
+                            updated_at     = NOW()
+           WHERE id = $1`,
+          [homeTeam.id, homeScore, awayScore]
+        );
+        await query(
+          `UPDATE teams SET points_for     = points_for     + $2,
+                            points_against = points_against + $3,
+                            updated_at     = NOW()
+           WHERE id = $1`,
+          [awayTeam.id, awayScore, homeScore]
+        );
+      }
+
       imported++;
     }
 
@@ -381,6 +726,73 @@ router.post('/:id/import-matchups/:week', authenticate, requireCommissioner, asy
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Import failed';
     res.status(502).json({ error: `Matchup import failed: ${msg}` });
+  }
+});
+
+// =============================================
+// POST /api/leagues/:id/generate-schedule — commissioner only
+// Creates a round-robin matchup schedule for native (non-Sleeper) leagues.
+// Query param: ?weeks=13 (default: 13 regular season weeks)
+// Idempotent: skips weeks that already have matchups.
+// =============================================
+router.post('/:id/generate-schedule', authenticate, requireCommissioner, async (req: AuthRequest, res: Response) => {
+  try {
+    const { rows: [league] } = await query('SELECT * FROM leagues WHERE id = $1', [req.params.id]);
+    if (!league) { res.status(404).json({ error: 'League not found' }); return; }
+
+    const { rows: teams } = await query(
+      'SELECT id FROM teams WHERE league_id = $1 ORDER BY created_at',
+      [req.params.id]
+    );
+    if (teams.length < 2) {
+      res.status(400).json({ error: 'Need at least 2 teams to generate a schedule' });
+      return;
+    }
+
+    const totalWeeks = Math.min(parseInt(req.query.weeks as string || '13', 10), 18);
+    const ids: string[] = teams.map((t: { id: string }) => t.id);
+
+    // Standard round-robin (circle method). If odd number of teams, add a bye.
+    const hasBye = ids.length % 2 !== 0;
+    if (hasBye) ids.push('bye');
+    const n = ids.length; // always even
+
+    let created = 0;
+    let skipped = 0;
+
+    for (let week = 1; week <= totalWeeks; week++) {
+      // Check if this week already has matchups
+      const { rows: existing } = await query(
+        'SELECT id FROM matchups WHERE league_id = $1 AND week = $2 LIMIT 1',
+        [req.params.id, week]
+      );
+      if (existing.length > 0) { skipped++; continue; }
+
+      // Rotate: pin ids[0], rotate rest by (week-1)
+      const rotated = [ids[0]];
+      for (let i = 1; i < n; i++) {
+        rotated.push(ids[1 + ((i - 1 + week - 1) % (n - 1))]);
+      }
+
+      for (let i = 0; i < n / 2; i++) {
+        const home = rotated[i];
+        const away = rotated[n - 1 - i];
+        if (home === 'bye' || away === 'bye') continue;
+
+        await query(
+          `INSERT INTO matchups (league_id, week, home_team_id, away_team_id)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT DO NOTHING`,
+          [req.params.id, week, home, away]
+        );
+        created++;
+      }
+    }
+
+    res.json({ message: 'Schedule generated', weeks: totalWeeks, matchups_created: created, weeks_skipped: skipped });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Schedule generation failed';
+    res.status(500).json({ error: msg });
   }
 });
 

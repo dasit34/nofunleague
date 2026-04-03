@@ -12,9 +12,9 @@ export default function NewLeaguePage() {
   const setActiveLeague = useLeagueStore((s) => s.setActiveLeague);
   const [form, setForm] = useState({
     name: '',
-    sleeper_league_id: '',
-    season: new Date().getFullYear(),
-    ai_enabled: true,
+    league_size: 10,
+    scoring_type: 'half_ppr' as 'standard' | 'half_ppr' | 'ppr',
+    scoring_source: 'mock' as 'mock' | 'real',
   });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -26,8 +26,9 @@ export default function NewLeaguePage() {
     try {
       const league = await leaguesApi.create({
         name: form.name,
-        sleeper_league_id: form.sleeper_league_id || undefined,
-        season: form.season,
+        league_size: form.league_size,
+        scoring_type: form.scoring_type,
+        scoring_source: form.scoring_source,
       }) as League;
       setActiveLeague(league);
       router.push(`/dashboard/leagues/${league.id}`);
@@ -64,50 +65,46 @@ export default function NewLeaguePage() {
             </div>
 
             <div>
-              <label className="text-white/60 text-sm font-semibold mb-1.5 block">
-                Sleeper League ID
-                <span className="text-white/30 font-normal ml-2">(optional — link your existing Sleeper league)</span>
-              </label>
-              <input
-                type="text"
+              <label className="text-white/60 text-sm font-semibold mb-1.5 block">League Size</label>
+              <select
                 className="input-dark"
-                placeholder="e.g. 1048616708453257216"
-                value={form.sleeper_league_id}
-                onChange={(e) => setForm({ ...form, sleeper_league_id: e.target.value })}
-              />
-              <p className="text-white/30 text-xs mt-1.5">
-                Find your Sleeper league ID in the URL when viewing your league on sleeper.app
-              </p>
+                value={form.league_size}
+                onChange={(e) => setForm({ ...form, league_size: parseInt(e.target.value) })}
+              >
+                {Array.from({ length: 13 }, (_, i) => i + 4).map((n) => (
+                  <option key={n} value={n}>{n} teams</option>
+                ))}
+              </select>
             </div>
 
             <div>
-              <label className="text-white/60 text-sm font-semibold mb-1.5 block">Season</label>
-              <input
-                type="number"
+              <label className="text-white/60 text-sm font-semibold mb-1.5 block">Scoring Type</label>
+              <select
                 className="input-dark"
-                value={form.season}
-                onChange={(e) => setForm({ ...form, season: parseInt(e.target.value) })}
-                min={2020}
-                max={2030}
-              />
+                value={form.scoring_type}
+                onChange={(e) => setForm({ ...form, scoring_type: e.target.value as 'standard' | 'half_ppr' | 'ppr' })}
+              >
+                <option value="standard">Standard</option>
+                <option value="half_ppr">Half PPR</option>
+                <option value="ppr">PPR</option>
+              </select>
             </div>
 
-            <div className="flex items-center justify-between p-4 bg-gold/5 border border-gold/20 rounded-lg">
-              <div>
-                <p className="text-white font-semibold text-sm">Enable AI (CHAOS)</p>
-                <p className="text-white/40 text-xs mt-0.5">Automated trash talk, recaps, and chaos</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setForm({ ...form, ai_enabled: !form.ai_enabled })}
-                className={`w-12 h-6 rounded-full transition-colors relative ${
-                  form.ai_enabled ? 'bg-gold' : 'bg-white/20'
-                }`}
+            <div>
+              <label className="text-white/60 text-sm font-semibold mb-1.5 block">Scoring Source</label>
+              <select
+                className="input-dark"
+                value={form.scoring_source}
+                onChange={(e) => setForm({ ...form, scoring_source: e.target.value as 'mock' | 'real' })}
               >
-                <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                  form.ai_enabled ? 'translate-x-7' : 'translate-x-1'
-                }`} />
-              </button>
+                <option value="mock">Mock (random scores)</option>
+                <option value="real">Real (Sleeper stats)</option>
+              </select>
+              <p className="text-white/30 text-xs mt-1">
+                {form.scoring_source === 'real'
+                  ? 'Uses real NFL player stats from Sleeper. Requires stats sync.'
+                  : 'Uses random mock scores for testing.'}
+              </p>
             </div>
 
             <div className="flex gap-3 pt-2">

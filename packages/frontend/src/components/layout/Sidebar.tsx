@@ -5,23 +5,34 @@ import { useAuthStore, useLeagueStore } from '@/lib/store';
 import { auth as authApi } from '@/lib/api';
 import clsx from 'clsx';
 
-const navItems = [
-  { href: '/dashboard',            label: 'Dashboard',   icon: '🏠' },
-  { href: '/dashboard/matchups',   label: 'Matchups',    icon: '⚔️' },
-  { href: '/dashboard/standings',  label: 'Standings',   icon: '🏆' },
-  { href: '/dashboard/roster',     label: 'My Roster',   icon: '👥' },
-  { href: '/dashboard/players',    label: 'Players',     icon: '🏈' },
-  { href: '/dashboard/draft',      label: 'Draft',       icon: '📋' },
-  { href: '/dashboard/trades',     label: 'Trades',      icon: '🔄' },
-  { href: '/dashboard/chat',       label: 'League Chat', icon: '💬' },
-  { href: '/dashboard/ai',         label: 'AI Chaos',    icon: '🤖' },
+const commonItems = [
+  { href: '/dashboard',            label: 'Dashboard',  icon: '🏠' },
+  { href: '/dashboard/matchups',   label: 'Matchups',   icon: '⚔️' },
+  { href: '/dashboard/standings',  label: 'Standings',  icon: '🏆' },
+  { href: '/dashboard/draft',      label: 'Draft',      icon: '📋' },
+  { href: '/dashboard/players',    label: 'Players',    icon: '🏈' },
+  { href: '/dashboard/trades',     label: 'Trades',     icon: '🔄' },
+  { href: '/dashboard/mock-draft', label: 'Mock Draft', icon: '🧪' },
 ];
+
+// Team managers need My Roster; commissioners manage their league from the league page
+const teamManagerItems = [
+  { href: '/dashboard/roster', label: 'My Roster', icon: '👥' },
+];
+
+const commissionerItems: typeof teamManagerItems = [];
 
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, clearAuth } = useAuthStore();
   const activeLeague = useLeagueStore((s) => s.activeLeague);
+
+  const isCommissioner = !!activeLeague && activeLeague.commissioner_id === user?.id;
+  const navItems = [
+    ...commonItems,
+    ...(isCommissioner ? commissionerItems : teamManagerItems),
+  ];
 
   async function handleSignOut() {
     try { await authApi.logout(); } catch { /* ignore — stateless JWT */ }

@@ -228,8 +228,8 @@ export async function syncPlayerStats(
         `INSERT INTO player_stats
            (player_id, season, week, season_type, stats, projected,
             fantasy_pts_std, fantasy_pts_half, fantasy_pts_ppr, last_synced_at)
-         SELECT $1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, NOW()
-         WHERE EXISTS (SELECT 1 FROM players WHERE id = $1)
+         SELECT $1::varchar, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, NOW()
+         WHERE EXISTS (SELECT 1 FROM players WHERE id = $1::varchar)
          ON CONFLICT (player_id, season, week, season_type) DO UPDATE SET
            stats            = EXCLUDED.stats,
            projected        = EXCLUDED.projected,
@@ -238,7 +238,7 @@ export async function syncPlayerStats(
            fantasy_pts_ppr  = EXCLUDED.fantasy_pts_ppr,
            last_synced_at   = NOW()`,
         [
-          playerId,
+          String(playerId),
           season,
           week,
           seasonType,

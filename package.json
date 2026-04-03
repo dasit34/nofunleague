@@ -12,7 +12,9 @@
     "dev:backend": "npm run dev --workspace=packages/backend",
     "build": "npm run build --workspace=packages/frontend && npm run build --workspace=packages/backend",
     "db:migrate": "npm run migrate --workspace=packages/backend",
-    "db:seed": "npm run seed --workspace=packages/backend"
+    "db:seed": "npm run seed --workspace=packages/backend",
+    "db:reset-dev": "npm run db:reset-dev --workspace=packages/backend",
+    "db:fresh": "npm run db:reset-dev --workspace=packages/backend && npm run seed --workspace=packages/backend"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

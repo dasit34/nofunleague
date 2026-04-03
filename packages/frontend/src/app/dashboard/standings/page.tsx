@@ -87,7 +87,7 @@ export default function StandingsPage() {
                 {teams.length === 0 && (
                   <tr>
                     <td colSpan={8} className="text-center text-white/30 py-12 text-sm">
-                      No teams yet — sync from Sleeper to populate standings.
+                      No teams in this league yet.
                     </td>
                   </tr>
                 )}
