@@ -169,7 +169,7 @@ async function main() {
 
   await step('Non-commissioner cannot start draft', async () => {
     try {
-      await startDraft(leagueId, aliceId, { total_rounds: 5 });
+      await startDraft(leagueId, aliceId);
       throw new Error('Should have been rejected');
     } catch (err) {
       const msg = (err as Error).message;
@@ -180,11 +180,8 @@ async function main() {
   });
 
   let sessionId = '';
-  await step('Commissioner starts 5-round draft', async () => {
-    const result = await startDraft(leagueId, commishId, {
-      total_rounds: 5,
-      seconds_per_pick: 90,
-    });
+  await step('Commissioner starts draft (rounds from settings)', async () => {
+    const result = await startDraft(leagueId, commishId);
     sessionId = result.session_id;
     if (!sessionId) throw new Error('No session_id returned');
   });

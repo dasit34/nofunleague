@@ -3,6 +3,7 @@ import useSWR from 'swr';
 import Link from 'next/link';
 import { useAuthStore, useLeagueStore } from '@/lib/store';
 import { leagues as leaguesApi, auth as authApi } from '@/lib/api';
+import { formatStatus } from '@/types';
 import TopBar from '@/components/layout/TopBar';
 import type { League } from '@/types';
 
@@ -93,7 +94,7 @@ export default function DashboardPage() {
                         ? 'bg-green-500/20 text-green-400 border border-green-500/30'
                         : 'badge-dark'
                     }`}>
-                      {league.status.replace('_', ' ')}
+                      {formatStatus(league.status)}
                     </span>
                   </div>
 

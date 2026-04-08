@@ -1,5 +1,11 @@
 import { query, getClient } from '../config/database';
 import type { PoolClient } from 'pg';
+import { getSettings } from './settingsService';
+import {
+  draftRounds,
+  assignDraftSlot,
+  isStarterSlot,
+} from '../config/leagueSettings';
 
 // =============================================
 // Snake draft helpers
@@ -27,13 +33,12 @@ export function pickInRoundOf(overallPick: number, numTeams: number): number {
 }
 
 // =============================================
-// Start draft
+// Start draft — reads rounds + timer from league settings
 // =============================================
 
 export async function startDraft(
   leagueId: string,
   userId: string,
-  opts: { total_rounds?: number; seconds_per_pick?: number } = {}
 ): Promise<{ session_id: string }> {
   // Only commissioner may start
   const { rows: [league] } = await query(
@@ -53,14 +58,17 @@ export async function startDraft(
   );
   if (teams.length < 2) throw Object.assign(new Error('Need at least 2 teams to start a draft'), { status: 400 });
 
+  // Read settings — source of truth for rounds and timer
+  const settings = await getSettings(leagueId);
+  const totalRounds    = draftRounds(settings.roster);
+  const secondsPerPick = settings.draft.seconds_per_pick;
+
   // Randomize draft order (Fisher-Yates shuffle)
   const draftOrder = teams.map((t: { id: string }) => t.id);
   for (let i = draftOrder.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [draftOrder[i], draftOrder[j]] = [draftOrder[j], draftOrder[i]];
   }
-  const totalRounds    = opts.total_rounds    ?? 15;
-  const secondsPerPick = opts.seconds_per_pick ?? 90;
 
   // Upsert: if a pending session exists reuse it; otherwise create
   const { rows: [existing] } = await query(
@@ -143,8 +151,8 @@ export async function getDraftState(leagueId: string): Promise<DraftStatePayload
 
   // Current team on the clock
   let currentTeamId: string | null = null;
-  let round      = roundOf(session.current_pick as number, numTeams);
-  let pickInRound = pickInRoundOf(session.current_pick as number, numTeams);
+  const round      = roundOf(session.current_pick as number, numTeams);
+  const pickInRound = pickInRoundOf(session.current_pick as number, numTeams);
 
   if (!isDone) {
     const idx = snakeIndex(session.current_pick as number, numTeams);
@@ -158,18 +166,21 @@ export async function getDraftState(leagueId: string): Promise<DraftStatePayload
     secondsRemaining = Math.max(0, Math.floor((session.seconds_per_pick as number) - elapsed));
   }
 
-  // Timer expired — trigger auto-pick in background; next poll will reflect it
+  // Timer expired — trigger auto-pick if enabled
   if (!isDone && secondsRemaining <= 0) {
-    performAutoPick(leagueId).catch((err) =>
-      console.error('[Draft] Auto-pick trigger failed:', err)
-    );
+    const settings = await getSettings(leagueId);
+    if (settings.draft.auto_pick_on_timeout) {
+      performAutoPick(leagueId).catch((err) =>
+        console.error('[Draft] Auto-pick trigger failed:', err)
+      );
+    }
   }
 
   return { session, teams, picks, currentTeamId, round, pickInRound, secondsRemaining };
 }
 
 // =============================================
-// Make a pick
+// Make a pick — assigns player to correct roster slot
 // =============================================
 
 export async function makePick(
@@ -216,9 +227,9 @@ export async function makePick(
     );
     if (already) throw Object.assign(new Error('Player already drafted'), { status: 409 });
 
-    // Player must exist
+    // Player must exist — also fetch position for slot assignment
     const { rows: [player] } = await client.query(
-      'SELECT id FROM players WHERE id=$1',
+      'SELECT id, position FROM players WHERE id=$1',
       [playerId]
     );
     if (!player) throw Object.assign(new Error('Player not found'), { status: 404 });
@@ -235,12 +246,22 @@ export async function makePick(
       [session.id, leagueId, team.id, playerId, curPick, round, pickInRound]
     );
 
-    // Assign to roster
+    // Determine roster slot from league settings
+    const settings = await getSettings(leagueId);
+    const { rows: filledRows } = await client.query(
+      'SELECT roster_slot FROM rosters WHERE team_id = $1 AND roster_slot IS NOT NULL',
+      [team.id]
+    );
+    const filledSlots = filledRows.map((r: { roster_slot: string }) => r.roster_slot);
+    const rosterSlot = assignDraftSlot(player.position, filledSlots, settings.roster);
+    const starter = isStarterSlot(rosterSlot);
+
+    // Assign to roster with correct slot
     await client.query(
-      `INSERT INTO rosters (team_id, player_id, acquisition_type, acquisition_week, is_starter)
-       VALUES ($1,$2,'draft',1,FALSE)
+      `INSERT INTO rosters (team_id, player_id, acquisition_type, acquisition_week, is_starter, roster_slot)
+       VALUES ($1,$2,'draft',$3,$4,$5)
        ON CONFLICT (team_id, player_id) DO NOTHING`,
-      [team.id, playerId]
+      [team.id, playerId, round, starter, rosterSlot]
     );
 
     // Advance draft
@@ -261,34 +282,12 @@ export async function makePick(
     );
 
     if (isDone) {
-      // Transition to in_season, reset week to 1, unlock lineups
-      await client.query(
-        `UPDATE leagues SET status='in_season', week=1, lineup_locked_week=0, updated_at=NOW() WHERE id=$1`,
-        [leagueId]
+      await finalizeDraft(
+        leagueId,
+        session.draft_order as string[],
+        settings.season.regular_season_weeks,
+        client,
       );
-
-      // Reset team records for a clean season start
-      await client.query(
-        `UPDATE teams SET wins=0, losses=0, ties=0, points_for=0, points_against=0, updated_at=NOW()
-         WHERE league_id=$1`,
-        [leagueId]
-      );
-
-      // Auto-generate round-robin schedule
-      try {
-        await generateScheduleForLeague(client, leagueId);
-      } catch (schedErr) {
-        console.error('[Draft] Schedule generation failed:', schedErr);
-      }
-
-      // Set waiver priority: reverse draft order (last pick gets priority 1)
-      const draftOrder = session.draft_order as string[];
-      for (let i = 0; i < draftOrder.length; i++) {
-        await client.query(
-          'UPDATE teams SET waiver_priority = $1, updated_at = NOW() WHERE id = $2',
-          [draftOrder.length - i, draftOrder[i]]
-        );
-      }
     }
 
     await client.query('COMMIT');
@@ -302,7 +301,7 @@ export async function makePick(
 }
 
 // =============================================
-// Auto-pick (timer expiry)
+// Auto-pick (timer expiry) — assigns player to correct roster slot
 // =============================================
 
 /**
@@ -337,7 +336,7 @@ export async function performAutoPick(leagueId: string): Promise<void> {
 
     // Best available: highest peak PPR, then alphabetical fallback
     const { rows: [player] } = await client.query(
-      `SELECT p.id
+      `SELECT p.id, p.position
        FROM players p
        LEFT JOIN (
          SELECT player_id, MAX(fantasy_pts_ppr) AS best_ppr
@@ -364,13 +363,23 @@ export async function performAutoPick(leagueId: string): Promise<void> {
       [session.id, leagueId, teamId, player.id, curPick, round, pickInRound]
     );
 
-    // Add to roster
+    // Determine roster slot from league settings
+    const settings = await getSettings(leagueId);
+    const { rows: filledRows } = await client.query(
+      'SELECT roster_slot FROM rosters WHERE team_id = $1 AND roster_slot IS NOT NULL',
+      [teamId]
+    );
+    const filledSlots = filledRows.map((r: { roster_slot: string }) => r.roster_slot);
+    const rosterSlot = assignDraftSlot(player.position, filledSlots, settings.roster);
+    const starter = isStarterSlot(rosterSlot);
+
+    // Add to roster with correct slot
     await client.query(
-      `INSERT INTO rosters (team_id, player_id, acquisition_type, acquisition_week, is_starter)
-       SELECT $1, $2, 'draft', 1, FALSE
+      `INSERT INTO rosters (team_id, player_id, acquisition_type, acquisition_week, is_starter, roster_slot)
+       SELECT $1, $2, 'draft', $3, $4, $5
        WHERE  EXISTS (SELECT 1 FROM players WHERE id = $2)
        ON CONFLICT (team_id, player_id) DO NOTHING`,
-      [teamId, player.id]
+      [teamId, player.id, round, starter, rosterSlot]
     );
 
     const nextPick = curPick + 1;
@@ -388,42 +397,78 @@ export async function performAutoPick(leagueId: string): Promise<void> {
     );
 
     if (isDone) {
-      await client.query(
-        `UPDATE leagues SET status='in_season', week=1, lineup_locked_week=0, updated_at=NOW() WHERE id=$1`,
-        [leagueId]
+      await finalizeDraft(
+        leagueId,
+        session.draft_order as string[],
+        settings.season.regular_season_weeks,
+        client,
       );
-
-      // Reset team records
-      await client.query(
-        `UPDATE teams SET wins=0, losses=0, ties=0, points_for=0, points_against=0, updated_at=NOW()
-         WHERE league_id=$1`,
-        [leagueId]
-      );
-
-      // Auto-generate schedule
-      try {
-        await generateScheduleForLeague(client, leagueId);
-      } catch (schedErr) {
-        console.error('[Draft/AutoPick] Schedule generation failed:', schedErr);
-      }
-
-      // Set waiver priority
-      const draftOrder = session.draft_order as string[];
-      for (let i = 0; i < draftOrder.length; i++) {
-        await client.query(
-          'UPDATE teams SET waiver_priority = $1 WHERE id = $2',
-          [draftOrder.length - i, draftOrder[i]]
-        );
-      }
     }
 
     await client.query('COMMIT');
-    console.log(`[Draft] Auto-pick: team ${teamId} → player ${player.id} (overall pick ${curPick})`);
+    console.log(`[Draft] Auto-pick: team ${teamId} → player ${player.id} (overall pick ${curPick}, slot ${rosterSlot})`);
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[Draft] performAutoPick failed:', err);
   } finally {
     client.release();
+  }
+}
+
+// =============================================
+// Finalize draft — shared completion logic
+// Called when the last pick is made (from any code path).
+// Idempotent: safe to call multiple times for the same league.
+// =============================================
+
+export async function finalizeDraft(
+  leagueId: string,
+  draftOrder: string[],
+  regularSeasonWeeks: number,
+  externalClient?: PoolClient,
+): Promise<void> {
+  const client = externalClient ?? await getClient();
+  const ownTransaction = !externalClient;
+
+  try {
+    if (ownTransaction) await client.query('BEGIN');
+
+    // Transition to in_season (idempotent — only if still in drafting)
+    await client.query(
+      `UPDATE leagues SET status='in_season', week=1, lineup_locked_week=0, updated_at=NOW()
+       WHERE id=$1 AND status='drafting'`,
+      [leagueId]
+    );
+
+    // Reset team records for a clean season start
+    await client.query(
+      `UPDATE teams SET wins=0, losses=0, ties=0, points_for=0, points_against=0, updated_at=NOW()
+       WHERE league_id=$1`,
+      [leagueId]
+    );
+
+    // Auto-generate round-robin schedule
+    try {
+      await generateScheduleForLeague(client, leagueId, regularSeasonWeeks);
+    } catch (schedErr) {
+      console.error('[Draft] Schedule generation failed:', schedErr);
+    }
+
+    // Set waiver priority: reverse draft order (last pick gets priority 1)
+    for (let i = 0; i < draftOrder.length; i++) {
+      await client.query(
+        'UPDATE teams SET waiver_priority = $1, updated_at = NOW() WHERE id = $2',
+        [draftOrder.length - i, draftOrder[i]]
+      );
+    }
+
+    if (ownTransaction) await client.query('COMMIT');
+    console.log(`[Draft] Finalized league ${leagueId}: in_season, ${regularSeasonWeeks}-week schedule, waiver priority set`);
+  } catch (err) {
+    if (ownTransaction) await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    if (ownTransaction) client.release();
   }
 }
 
@@ -478,7 +523,7 @@ export async function getAvailablePlayers(
 // Auto-generate round-robin schedule after draft
 // =============================================
 
-async function generateScheduleForLeague(client: PoolClient, leagueId: string): Promise<void> {
+async function generateScheduleForLeague(client: PoolClient, leagueId: string, regularSeasonWeeks: number): Promise<void> {
   const { rows: teams } = await client.query(
     'SELECT id FROM teams WHERE league_id = $1 ORDER BY created_at',
     [leagueId]
@@ -486,7 +531,7 @@ async function generateScheduleForLeague(client: PoolClient, leagueId: string): 
   if (teams.length < 2) return;
 
   const ids: string[] = teams.map((t: { id: string }) => t.id);
-  const totalWeeks = 13;
+  const totalWeeks = Math.min(regularSeasonWeeks, 18);
 
   // Standard round-robin (circle method). If odd number of teams, add a bye.
   const hasBye = ids.length % 2 !== 0;

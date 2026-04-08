@@ -2,6 +2,8 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query, pool } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import { generateSlotNames, totalRosterSize } from '../config/leagueSettings';
+import { getSettings } from '../services/settingsService';
 
 const router = Router();
 
@@ -349,29 +351,69 @@ router.post('/:id/approve', authenticate, async (req: AuthRequest, res: Response
     return;
   }
 
-  // Approve: execute atomic roster swap
+  // Approve: validate post-trade rosters, then execute atomic swap
   const { rows: items } = await query('SELECT * FROM trade_items WHERE trade_id = $1', [trade.id]);
+
+  // Pre-validate: verify all traded players still on correct teams
+  for (const item of items) {
+    const { rows: [onRoster] } = await query(
+      'SELECT 1 FROM rosters WHERE team_id = $1 AND player_id = $2',
+      [item.from_team_id, item.player_id]
+    );
+    if (!onRoster) {
+      res.status(400).json({ error: `Player ${item.player_id} is no longer on the expected team. Trade cannot be executed.` });
+      return;
+    }
+  }
+
+  // Get roster settings for bench slot assignment
+  const settings = await getSettings(trade.league_id as string);
+  const allSlots = generateSlotNames(settings.roster);
+  const benchSlotNames = allSlots.filter(s => s.startsWith('BN'));
+
+  // Helper: find first open bench slot for a team after the trade swap
+  async function findBenchSlotForTeam(teamId: string, client: import('pg').PoolClient): Promise<string | null> {
+    const { rows: occupied } = await client.query(
+      `SELECT roster_slot FROM rosters WHERE team_id = $1 AND roster_slot LIKE 'BN%'`,
+      [teamId]
+    );
+    const occupiedSet = new Set(occupied.map((r: { roster_slot: string }) => r.roster_slot));
+    for (const slot of benchSlotNames) {
+      if (!occupiedSet.has(slot)) return slot;
+    }
+    return null;
+  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    // Step 1: Remove all traded players from their current teams
     for (const item of items) {
-      // Remove player from current team
       await client.query(
         'DELETE FROM rosters WHERE team_id = $1 AND player_id = $2',
         [item.from_team_id, item.player_id]
       );
-      // Add player to new team — lands on bench, new owner sets their slot
+    }
+
+    // Step 2: Add players to their new teams with proper bench slots
+    for (const item of items) {
+      const benchSlot = await findBenchSlotForTeam(item.to_team_id, client);
+      if (!benchSlot) {
+        await client.query('ROLLBACK');
+        res.status(400).json({ error: `No bench slot available on destination team. Trade cannot be executed.` });
+        return;
+      }
+
       await client.query(
         `INSERT INTO rosters (team_id, player_id, acquisition_type, acquisition_week, is_starter, roster_slot)
-         VALUES ($1, $2, 'trade', $3, false, 'BN')
+         VALUES ($1, $2, 'trade', $3, false, $4)
          ON CONFLICT (team_id, player_id) DO NOTHING`,
-        [item.to_team_id, item.player_id, league.week]
+        [item.to_team_id, item.player_id, league.week, benchSlot]
       );
     }
 
-    // Log roster transactions for each swapped player
+    // Step 3: Log roster transactions
     for (const item of items) {
       await client.query(
         `INSERT INTO roster_transactions (league_id, user_id, team_id, player_id, type, detail)
@@ -404,6 +446,37 @@ router.post('/:id/approve', authenticate, async (req: AuthRequest, res: Response
 
   const { rows: [finalTrade] } = await query('SELECT * FROM trades WHERE id = $1', [trade.id]);
   const [enriched] = await enrichTrades([finalTrade]);
+  res.json(enriched);
+});
+
+// =============================================
+// POST /api/trades/:id/cancel
+// Proposer cancels a pending trade
+// =============================================
+router.post('/:id/cancel', authenticate, async (req: AuthRequest, res: Response) => {
+  const { rows: [trade] } = await query(
+    `SELECT t.*, pt.user_id AS proposing_user_id
+     FROM trades t JOIN teams pt ON pt.id = t.proposing_team_id
+     WHERE t.id = $1`,
+    [req.params.id]
+  );
+  if (!trade) { res.status(404).json({ error: 'Trade not found' }); return; }
+  if (trade.status !== 'pending') {
+    res.status(400).json({ error: `Cannot cancel a trade with status: ${trade.status}` });
+    return;
+  }
+  if (trade.proposing_user_id !== req.user!.id) {
+    res.status(403).json({ error: 'Only the proposer can cancel this trade' });
+    return;
+  }
+
+  const { rows: [updated] } = await query(
+    `UPDATE trades SET status = 'rejected', response_note = 'Canceled by proposer', responded_at = NOW()
+     WHERE id = $1 RETURNING *`,
+    [trade.id]
+  );
+
+  const [enriched] = await enrichTrades([updated]);
   res.json(enriched);
 });
 

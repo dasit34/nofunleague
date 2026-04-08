@@ -143,7 +143,7 @@ async function main() {
 
   // Start draft (5 rounds × 4 teams = 20 picks)
   try {
-    await startDraft(league.id, commissioner.id, { total_rounds: 5, seconds_per_pick: 9999 });
+    await startDraft(league.id, commissioner.id);
     pass('Draft started');
   } catch (err) {
     fail('Start draft', err);

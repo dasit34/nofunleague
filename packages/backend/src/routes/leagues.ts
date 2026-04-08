@@ -10,7 +10,16 @@ import {
   getSleeperMatchups,
   getNFLState,
 } from '../services/sleeperService';
-import { scoreWeekReal } from '../services/scoringService';
+import { scoreWeekReal, persistWeeklyScores, getTeamWeeklyScore, type PlayerScore } from '../services/scoringService';
+import { DEFAULT_ROSTER, getRosterSettings, totalRosterSize, type RosterSettings } from '../config/rosterConfig';
+import {
+  mergeWithDefaults,
+  createDefaultSettings,
+  type LeagueSettings,
+  RosterSettingsSchema,
+} from '../config/leagueSettings';
+import * as settingsService from '../services/settingsService';
+import { generateFirstRoundBracket, advancePlayoffRound, checkForChampion, type GeneratedBracket, type AdvancementResult } from '../services/playoffService';
 
 const router = Router();
 
@@ -45,27 +54,57 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
     league_size:       z.number().int().min(4).max(16).optional(),
     scoring_type:      z.enum(['standard', 'half_ppr', 'ppr']).optional(),
     scoring_source:    z.enum(['mock', 'real']).optional(),
+    roster_settings:   z.object({
+      qb_slots:        z.number().int().min(0).max(4),
+      rb_slots:        z.number().int().min(0).max(8),
+      wr_slots:        z.number().int().min(0).max(8),
+      te_slots:        z.number().int().min(0).max(4),
+      flex_slots:      z.number().int().min(0).max(4),
+      flex_types:      z.enum(['RB_WR', 'RB_WR_TE', 'QB_RB_WR_TE']),
+      superflex_slots: z.number().int().min(0).max(2).default(0),
+      k_slots:         z.number().int().min(0).max(2),
+      def_slots:       z.number().int().min(0).max(2),
+      bench_slots:     z.number().int().min(0).max(15),
+      ir_slots:        z.number().int().min(0).max(5).default(0),
+      max_qb:          z.number().int().min(0).max(10).default(0),
+      max_rb:          z.number().int().min(0).max(10).default(0),
+      max_wr:          z.number().int().min(0).max(10).default(0),
+      max_te:          z.number().int().min(0).max(10).default(0),
+      max_k:           z.number().int().min(0).max(5).default(0),
+      max_def:         z.number().int().min(0).max(5).default(0),
+    }).optional(),
   });
 
   const body = Schema.parse(req.body);
+  const defaults = createDefaultSettings();
+  const roster = body.roster_settings ? { ...defaults.roster, ...body.roster_settings } : defaults.roster;
+  const scoringType = body.scoring_type ?? 'half_ppr';
+  const scoringSource = body.scoring_source ?? 'mock';
 
-  // Generate a simple unique invite code
+  // Build the full initial settings JSONB
+  const initialSettings: LeagueSettings = {
+    ...defaults,
+    roster,
+    scoring: { ...defaults.scoring, type: scoringType as LeagueSettings['scoring']['type'], source: scoringSource as LeagueSettings['scoring']['source'] },
+  };
+
   const inviteCode = Math.random().toString(36).substring(2, 10).toUpperCase();
 
   const { rows } = await query(
-    `INSERT INTO leagues (name, commissioner_id, sleeper_league_id, season, ai_enabled, league_size, scoring_type, invite_code, scoring_source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO leagues (name, commissioner_id, sleeper_league_id, season, ai_enabled, league_size, scoring_type, invite_code, scoring_source, settings)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
     [
       body.name,
       req.user!.id,
       body.sleeper_league_id || null,
-      body.season || 2025,
+      body.season || new Date().getFullYear(),
       body.ai_enabled ?? true,
       body.league_size ?? 10,
-      body.scoring_type ?? 'half_ppr',
+      scoringType,
       inviteCode,
-      body.scoring_source ?? 'mock',
+      scoringSource,
+      JSON.stringify(initialSettings),
     ]
   );
 
@@ -204,6 +243,56 @@ router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
 });
 
 // =============================================
+// GET /api/leagues/:id/standings — computed standings from team records
+// Sorted by wins DESC, points_for DESC, name ASC.
+// =============================================
+router.get('/:id/standings', authenticate, async (req: AuthRequest, res: Response) => {
+  const leagueId = req.params.id as string;
+
+  const { rows: [league] } = await query(
+    'SELECT id, week, status, season FROM leagues WHERE id = $1',
+    [leagueId]
+  );
+  if (!league) { res.status(404).json({ error: 'League not found' }); return; }
+
+  const { rows: teams } = await query(
+    `SELECT t.id, t.name, t.user_id, t.wins, t.losses, t.ties, t.points_for, t.points_against,
+            u.display_name, u.avatar_url
+     FROM teams t
+     LEFT JOIN users u ON u.id = t.user_id
+     WHERE t.league_id = $1
+     ORDER BY t.wins DESC, t.points_for DESC, t.name ASC`,
+    [leagueId]
+  );
+
+  const standings = teams.map((t: {
+    id: string; name: string; user_id: string;
+    wins: number; losses: number; ties: number;
+    points_for: string; points_against: string;
+    display_name: string | null; avatar_url: string | null;
+  }, index: number) => ({
+    rank: index + 1,
+    team_id: t.id,
+    team_name: t.name,
+    user_id: t.user_id,
+    display_name: t.display_name,
+    wins: t.wins,
+    losses: t.losses,
+    ties: t.ties,
+    record: `${t.wins}-${t.losses}${t.ties > 0 ? `-${t.ties}` : ''}`,
+    points_for: parseFloat(t.points_for) || 0,
+    points_against: parseFloat(t.points_against) || 0,
+  }));
+
+  res.json({
+    league_id: leagueId,
+    week: league.week,
+    status: league.status,
+    standings,
+  });
+});
+
+// =============================================
 // GET /api/leagues/:id/transactions — recent roster transactions
 // =============================================
 router.get('/:id/transactions', authenticate, async (req: AuthRequest, res: Response) => {
@@ -236,8 +325,8 @@ router.post('/:id/simulate-week', authenticate, requireCommissioner, async (req:
   try {
     const { rows: [league] } = await query('SELECT * FROM leagues WHERE id = $1', [req.params.id]);
     if (!league) { res.status(404).json({ error: 'League not found' }); return; }
-    if (league.status !== 'in_season') {
-      res.status(400).json({ error: 'League must be in_season to simulate' });
+    if (league.status !== 'in_season' && league.status !== 'post_season') {
+      res.status(400).json({ error: 'League must be in_season or post_season to simulate' });
       return;
     }
 
@@ -277,6 +366,21 @@ router.post('/:id/simulate-week', authenticate, requireCommissioner, async (req:
       return;
     }
 
+    // Check how many teams have starters set
+    const { rows: [starterCheck] } = await query(
+      `SELECT COUNT(DISTINCT r.team_id)::int AS teams_with_starters
+       FROM rosters r JOIN teams t ON t.id = r.team_id
+       WHERE t.league_id = $1 AND r.is_starter = TRUE`,
+      [req.params.id]
+    );
+    const teamsWithStarters = starterCheck.teams_with_starters as number;
+    const { rows: [{ cnt: totalTeams }] } = await query(
+      'SELECT COUNT(*)::int AS cnt FROM teams WHERE league_id = $1', [req.params.id]
+    );
+    const starterWarning = teamsWithStarters < (totalTeams as number)
+      ? `Warning: ${(totalTeams as number) - teamsWithStarters} of ${totalTeams} teams have no starters set. Their scores are estimated.`
+      : null;
+
     let scored = 0;
     const scoringSource = useReal ? 'real' : 'mock';
 
@@ -287,55 +391,123 @@ router.post('/:id/simulate-week', authenticate, requireCommissioner, async (req:
     } else {
       // Mock scoring — random points
       for (const matchup of matchups) {
-        const homeScore = await calculateMockTeamScore(matchup.home_team_id);
-        const awayScore = await calculateMockTeamScore(matchup.away_team_id);
+        const home = await calculateMockTeamScore(matchup.home_team_id);
+        const away = await calculateMockTeamScore(matchup.away_team_id);
 
         let winnerId: string | null = null;
-        if (homeScore > awayScore) winnerId = matchup.home_team_id;
-        else if (awayScore > homeScore) winnerId = matchup.away_team_id;
+        if (home.total > away.total) winnerId = matchup.home_team_id;
+        else if (away.total > home.total) winnerId = matchup.away_team_id;
 
         await query(
           `UPDATE matchups
            SET home_score = $1, away_score = $2, winner_team_id = $3, is_complete = TRUE,
                scoring_source = 'mock', updated_at = NOW()
            WHERE id = $4`,
-          [homeScore, awayScore, winnerId, matchup.id]
+          [home.total, away.total, winnerId, matchup.id]
         );
 
-        if (winnerId) {
-          const loserId = winnerId === matchup.home_team_id ? matchup.away_team_id : matchup.home_team_id;
-          await query('UPDATE teams SET wins = wins + 1, updated_at = NOW() WHERE id = $1', [winnerId]);
-          await query('UPDATE teams SET losses = losses + 1, updated_at = NOW() WHERE id = $1', [loserId]);
-        } else {
-          await query('UPDATE teams SET ties = ties + 1, updated_at = NOW() WHERE id = $1', [matchup.home_team_id]);
-          await query('UPDATE teams SET ties = ties + 1, updated_at = NOW() WHERE id = $1', [matchup.away_team_id]);
+        // Persist per-player and team-level weekly scores
+        await persistWeeklyScores(req.params.id as string, week, matchup.home_team_id, home.playerScores);
+        await persistWeeklyScores(req.params.id as string, week, matchup.away_team_id, away.playerScores);
+
+        // Update team records — only for regular season (not playoffs)
+        if (!matchup.is_playoffs) {
+          if (winnerId) {
+            const loserId = winnerId === matchup.home_team_id ? matchup.away_team_id : matchup.home_team_id;
+            await query('UPDATE teams SET wins = wins + 1, updated_at = NOW() WHERE id = $1', [winnerId]);
+            await query('UPDATE teams SET losses = losses + 1, updated_at = NOW() WHERE id = $1', [loserId]);
+          } else {
+            await query('UPDATE teams SET ties = ties + 1, updated_at = NOW() WHERE id = $1', [matchup.home_team_id]);
+            await query('UPDATE teams SET ties = ties + 1, updated_at = NOW() WHERE id = $1', [matchup.away_team_id]);
+          }
+
+          await query(
+            'UPDATE teams SET points_for = points_for + $2, points_against = points_against + $3, updated_at = NOW() WHERE id = $1',
+            [matchup.home_team_id, home.total, away.total]
+          );
+          await query(
+            'UPDATE teams SET points_for = points_for + $2, points_against = points_against + $3, updated_at = NOW() WHERE id = $1',
+            [matchup.away_team_id, away.total, home.total]
+          );
         }
-
-        await query(
-          'UPDATE teams SET points_for = points_for + $2, points_against = points_against + $3, updated_at = NOW() WHERE id = $1',
-          [matchup.home_team_id, homeScore, awayScore]
-        );
-        await query(
-          'UPDATE teams SET points_for = points_for + $2, points_against = points_against + $3, updated_at = NOW() WHERE id = $1',
-          [matchup.away_team_id, awayScore, homeScore]
-        );
 
         scored++;
       }
     }
 
-    // Advance league week
+    // Advance league week and detect season transitions
+    const nextWeek = week + 1;
+    const leagueSettings = mergeWithDefaults(league.settings as Record<string, unknown>);
+    const regularSeasonWeeks = leagueSettings.season.regular_season_weeks;
+    const playoffTeams = leagueSettings.playoffs.teams;
+
+    let newStatus = league.status as string;
+    let seasonTransition: string | null = null;
+    let playoffBracket: GeneratedBracket | null = null;
+    let playoffAdvancement: AdvancementResult | null = null;
+
+    // Transition: regular season just ended
+    if (league.status === 'in_season' && week >= regularSeasonWeeks) {
+      if (playoffTeams > 0) {
+        newStatus = 'post_season';
+        // Generate first-round playoff bracket from standings
+        try {
+          playoffBracket = await generateFirstRoundBracket(req.params.id as string, leagueSettings);
+          const byeMsg = playoffBracket.byes.length > 0
+            ? ` Seeds ${playoffBracket.byes.map(b => b.seed).join(', ')} have first-round byes.`
+            : '';
+          seasonTransition = `Regular season complete. ${playoffBracket.playoffTeams}-team playoffs begin week ${nextWeek}. ${playoffBracket.matchups.length} first-round matchups generated.${byeMsg}`;
+        } catch (bracketErr) {
+          console.error('[Playoffs] Bracket generation failed:', bracketErr);
+          seasonTransition = 'Regular season complete. Playoffs begin. (Bracket generation failed — use generate-schedule to create playoff matchups manually.)';
+        }
+      } else {
+        newStatus = 'complete';
+        seasonTransition = 'Season complete. No playoffs configured.';
+      }
+    }
+
+    // Playoff advancement: after scoring a playoff week, advance the bracket
+    if (league.status === 'post_season') {
+      try {
+        // Check if this was the championship game
+        const championCheck = await checkForChampion(req.params.id as string, week, leagueSettings);
+        if (championCheck.isChampionship && championCheck.championTeamId) {
+          newStatus = 'complete';
+          seasonTransition = `Season complete! Champion determined.`;
+          playoffAdvancement = {
+            outcome: 'champion',
+            championTeamId: championCheck.championTeamId,
+            message: 'Champion determined!',
+          };
+        } else {
+          // Try to advance to next round
+          playoffAdvancement = await advancePlayoffRound(req.params.id as string, week, leagueSettings);
+          if (playoffAdvancement.outcome === 'advanced') {
+            seasonTransition = playoffAdvancement.message;
+          }
+        }
+      } catch (advErr) {
+        console.error('[Playoffs] Advancement failed:', advErr);
+      }
+    }
+
     await query(
-      'UPDATE leagues SET week = week + 1, updated_at = NOW() WHERE id = $1',
-      [req.params.id]
+      'UPDATE leagues SET week = $2, status = $3, updated_at = NOW() WHERE id = $1',
+      [req.params.id, nextWeek, newStatus]
     );
 
     res.json({
-      message: `Week ${week} scored (${scoringSource})`,
+      message: `Week ${week} scored (${scoringSource})${starterWarning ? '. ' + starterWarning : ''}`,
       week,
       scoring_source: scoringSource,
+      warning: starterWarning,
       matchups_scored: scored,
-      next_week: week + 1,
+      next_week: nextWeek,
+      status: newStatus,
+      season_transition: seasonTransition,
+      playoff_bracket: playoffBracket,
+      playoff_advancement: playoffAdvancement,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Scoring failed';
@@ -360,11 +532,63 @@ router.post('/:id/unlock-lineup', authenticate, requireCommissioner, async (req:
   res.json({ message: `Lineups unlocked for week ${league.week}`, lineup_locked_week: newLockedWeek });
 });
 
+// =============================================
+// GET /api/leagues/:id/settings — full settings object
+// Members can read; returns merged-with-defaults settings.
+// =============================================
+router.get('/:id/settings', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const settings = await settingsService.getSettings(req.params.id as string);
+    res.json(settings);
+  } catch (err: unknown) {
+    const status = (err as { status?: number }).status || 500;
+    res.status(status).json({ error: (err as Error).message });
+  }
+});
+
+// =============================================
+// PATCH /api/leagues/:id/settings/:section — update a settings section
+// Commissioner only. Most sections locked after draft starts.
+// =============================================
+router.patch('/:id/settings/:section', authenticate, requireCommissioner, async (req: AuthRequest, res: Response) => {
+  const validSections = ['roster', 'scoring', 'draft', 'trades', 'waivers', 'season', 'playoffs'] as const;
+  const section = req.params.section as typeof validSections[number];
+
+  if (!validSections.includes(section)) {
+    res.status(400).json({ error: `Invalid settings section: ${section}` });
+    return;
+  }
+
+  try {
+    const result = await settingsService.updateSection(req.params.id as string, section, req.body);
+    res.json(result);
+  } catch (err: unknown) {
+    const status = (err as { status?: number }).status || 500;
+    const details = (err as { details?: unknown }).details;
+    res.status(status).json({ error: (err as Error).message, ...(details ? { details } : {}) });
+  }
+});
+
+// =============================================
+// PATCH /api/leagues/:id/roster-settings — update roster config (backward compat)
+// Commissioner only, pre-draft only.
+// =============================================
+router.patch('/:id/roster-settings', authenticate, requireCommissioner, async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await settingsService.updateRosterSettings(req.params.id as string, req.body);
+    res.json(result);
+  } catch (err: unknown) {
+    const status = (err as { status?: number }).status || 500;
+    const details = (err as { details?: unknown }).details;
+    res.status(status).json({ error: (err as Error).message, ...(details ? { details } : {}) });
+  }
+});
+
 /**
- * Calculate a mock team score by giving each starter a random score (5-25 pts).
- * Returns the total. If the team has no starters, gives a baseline random score.
+ * Calculate a mock team score by giving each starter a random score.
+ * Returns per-player scores for persistence.
  */
-async function calculateMockTeamScore(teamId: string): Promise<number> {
+async function calculateMockTeamScore(teamId: string): Promise<{ total: number; playerScores: PlayerScore[] }> {
   const { rows: starters } = await query(
     `SELECT r.player_id, r.roster_slot, p.position
      FROM rosters r
@@ -374,27 +598,28 @@ async function calculateMockTeamScore(teamId: string): Promise<number> {
   );
 
   if (starters.length === 0) {
-    // Fallback: count all rostered players and give them random scores
-    const { rows: allPlayers } = await query(
-      'SELECT player_id FROM rosters WHERE team_id = $1',
-      [teamId]
-    );
-    if (allPlayers.length === 0) return Math.round((60 + Math.random() * 80) * 100) / 100;
-    let total = 0;
-    for (const _ of allPlayers) {
-      total += 5 + Math.random() * 20;
-    }
-    return Math.round(total * 100) / 100;
+    const fallbackTotal = Math.round((60 + Math.random() * 80) * 100) / 100;
+    return { total: fallbackTotal, playerScores: [] };
   }
 
+  const playerScores: PlayerScore[] = [];
   let total = 0;
+
   for (const starter of starters) {
-    // QB tends to score higher, randomize by position
     const base = starter.position === 'QB' ? 12 : starter.position === 'K' ? 4 : 5;
     const range = starter.position === 'QB' ? 18 : starter.position === 'K' ? 12 : 20;
-    total += base + Math.random() * range;
+    const points = Math.round((base + Math.random() * range) * 100) / 100;
+    total += points;
+
+    playerScores.push({
+      playerId: starter.player_id,
+      points,
+      isStarter: true,
+      statBreakdown: { mock: points },
+    });
   }
-  return Math.round(total * 100) / 100;
+
+  return { total: Math.round(total * 100) / 100, playerScores };
 }
 
 // =============================================
@@ -402,15 +627,38 @@ async function calculateMockTeamScore(teamId: string): Promise<number> {
 // =============================================
 router.patch('/:id', authenticate, requireCommissioner, async (req: AuthRequest, res: Response) => {
   const Schema = z.object({
-    week:   z.number().int().min(1).max(22).optional(),
-    status: z.enum(['pre_draft', 'drafting', 'in_season', 'post_season', 'complete']).optional(),
+    name:    z.string().min(1).max(100).optional(),
+    season:  z.number().int().min(2020).max(2035).optional(),
+    week:    z.number().int().min(1).max(22).optional(),
+    status:  z.enum(['pre_draft', 'drafting', 'in_season', 'post_season', 'complete']).optional(),
   });
 
   const body = Schema.parse(req.body);
 
+  // Enforce valid state transitions — no backwards moves
+  if (body.status !== undefined) {
+    const { rows: [league] } = await query('SELECT status FROM leagues WHERE id = $1', [req.params.id]);
+    if (!league) { res.status(404).json({ error: 'League not found' }); return; }
+
+    const STATE_ORDER: Record<string, number> = {
+      pre_draft: 0, drafting: 1, in_season: 2, post_season: 3, complete: 4,
+    };
+    const currentRank = STATE_ORDER[league.status as string] ?? 0;
+    const targetRank = STATE_ORDER[body.status] ?? 0;
+
+    if (targetRank < currentRank) {
+      res.status(400).json({
+        error: `Cannot transition from ${league.status} to ${body.status}. Status can only move forward.`,
+      });
+      return;
+    }
+  }
+
   const sets: string[] = [];
   const params: unknown[] = [];
 
+  if (body.name !== undefined)   { sets.push(`name = $${params.length + 1}`);   params.push(body.name); }
+  if (body.season !== undefined) { sets.push(`season = $${params.length + 1}`); params.push(body.season); }
   if (body.week !== undefined)   { sets.push(`week = $${params.length + 1}`);   params.push(body.week); }
   if (body.status !== undefined) { sets.push(`status = $${params.length + 1}`); params.push(body.status); }
 
@@ -575,17 +823,58 @@ router.get('/:id/matchups/:week', authenticate, async (req: AuthRequest, res: Re
   const { rows } = await query(
     `SELECT m.*,
        ht.name as home_team_name, at.name as away_team_name,
+       hu.display_name as home_owner, au.display_name as away_owner,
+       hp.full_name as home_top_scorer_name, hws.total_points as home_top_scorer_pts,
+       ap.full_name as away_top_scorer_name, aws.total_points as away_top_scorer_pts
+     FROM matchups m
+     JOIN teams ht ON ht.id = m.home_team_id
+     JOIN teams at ON at.id = m.away_team_id
+     LEFT JOIN users hu ON hu.id = ht.user_id
+     LEFT JOIN users au ON au.id = at.user_id
+     LEFT JOIN weekly_scores hws ON hws.team_id = m.home_team_id AND hws.week = m.week
+     LEFT JOIN weekly_scores aws ON aws.team_id = m.away_team_id AND aws.week = m.week
+     LEFT JOIN players hp ON hp.id = hws.highest_scorer_id
+     LEFT JOIN players ap ON ap.id = aws.highest_scorer_id
+     WHERE m.league_id = $1 AND m.week = $2
+     ORDER BY m.home_score DESC`,
+    [req.params.id, week]
+  );
+  res.json(rows);
+});
+
+// =============================================
+// GET /api/leagues/:id/matchups/:matchupId/scores
+// Returns matchup with per-player score breakdowns from player_weekly_scores.
+// =============================================
+router.get('/:id/matchups/:matchupId/scores', authenticate, async (req: AuthRequest, res: Response) => {
+  const leagueId = req.params.id as string;
+  const matchupId = req.params.matchupId as string;
+
+  // Fetch matchup
+  const { rows: [matchup] } = await query(
+    `SELECT m.*,
+       ht.name as home_team_name, at.name as away_team_name,
        hu.display_name as home_owner, au.display_name as away_owner
      FROM matchups m
      JOIN teams ht ON ht.id = m.home_team_id
      JOIN teams at ON at.id = m.away_team_id
      LEFT JOIN users hu ON hu.id = ht.user_id
      LEFT JOIN users au ON au.id = at.user_id
-     WHERE m.league_id = $1 AND m.week = $2
-     ORDER BY m.home_score DESC`,
-    [req.params.id, week]
+     WHERE m.id = $1 AND m.league_id = $2`,
+    [matchupId, leagueId]
   );
-  res.json(rows);
+  if (!matchup) { res.status(404).json({ error: 'Matchup not found' }); return; }
+
+  // Fetch per-player scores for both teams
+  const week = matchup.week as number;
+  const homeScores = await getTeamWeeklyScore(leagueId, week, matchup.home_team_id);
+  const awayScores = await getTeamWeeklyScore(leagueId, week, matchup.away_team_id);
+
+  res.json({
+    matchup,
+    home: homeScores,
+    away: awayScores,
+  });
 });
 
 // =============================================
@@ -732,7 +1021,7 @@ router.post('/:id/import-matchups/:week', authenticate, requireCommissioner, asy
 // =============================================
 // POST /api/leagues/:id/generate-schedule — commissioner only
 // Creates a round-robin matchup schedule for native (non-Sleeper) leagues.
-// Query param: ?weeks=13 (default: 13 regular season weeks)
+// Query param: ?weeks=N overrides the default from settings.season.regular_season_weeks.
 // Idempotent: skips weeks that already have matchups.
 // =============================================
 router.post('/:id/generate-schedule', authenticate, requireCommissioner, async (req: AuthRequest, res: Response) => {
@@ -749,7 +1038,10 @@ router.post('/:id/generate-schedule', authenticate, requireCommissioner, async (
       return;
     }
 
-    const totalWeeks = Math.min(parseInt(req.query.weeks as string || '13', 10), 18);
+    // Default season length from settings; ?weeks=N overrides
+    const leagueSettings = mergeWithDefaults(league.settings as Record<string, unknown>);
+    const defaultWeeks = leagueSettings.season.regular_season_weeks;
+    const totalWeeks = Math.min(parseInt(req.query.weeks as string || String(defaultWeeks), 10), 18);
     const ids: string[] = teams.map((t: { id: string }) => t.id);
 
     // Standard round-robin (circle method). If odd number of teams, add a bye.
@@ -774,16 +1066,17 @@ router.post('/:id/generate-schedule', authenticate, requireCommissioner, async (
         rotated.push(ids[1 + ((i - 1 + week - 1) % (n - 1))]);
       }
 
+      const isPlayoffWeek = week > defaultWeeks;
       for (let i = 0; i < n / 2; i++) {
         const home = rotated[i];
         const away = rotated[n - 1 - i];
         if (home === 'bye' || away === 'bye') continue;
 
         await query(
-          `INSERT INTO matchups (league_id, week, home_team_id, away_team_id)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO matchups (league_id, week, home_team_id, away_team_id, is_playoffs)
+           VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT DO NOTHING`,
-          [req.params.id, week, home, away]
+          [req.params.id, week, home, away, isPlayoffWeek]
         );
         created++;
       }

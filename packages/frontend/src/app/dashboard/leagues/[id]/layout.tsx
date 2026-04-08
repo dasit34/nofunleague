@@ -6,6 +6,7 @@ import { leagues as leaguesApi } from '@/lib/api';
 import { useAuthStore, useLeagueStore } from '@/lib/store';
 import LeagueTabs from '@/components/league/LeagueTabs';
 import type { League, Team, LeagueMember } from '@/types';
+import { formatStatus } from '@/types';
 
 type LeagueWithDetails = League & { teams: Team[]; members: LeagueMember[] };
 
@@ -66,7 +67,7 @@ export default function LeagueLayout({
         <div>
           <h1 className="text-xl font-black text-white">{league.name}</h1>
           <p className="text-white/40 text-sm">
-            Season {league.season} · Week {league.week} · {league.status.replace('_', ' ')}
+            Season {league.season} · Week {league.week} · {formatStatus(league.status)}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -78,7 +79,7 @@ export default function LeagueLayout({
               ? 'bg-green-500/20 text-green-400 border border-green-500/30'
               : 'badge-dark'
           }`}>
-            {league.status.replace('_', ' ')}
+            {formatStatus(league.status)}
           </span>
         </div>
       </div>

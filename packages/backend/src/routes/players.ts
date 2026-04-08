@@ -26,16 +26,29 @@ const router = Router();
 router.get('/', async (req: Request, res: Response) => {
   const { position, team, search, league_id, limit = '50', offset = '0' } = req.query;
 
+  // Validate league_id is a real UUID if provided (not "undefined" or garbage)
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const validLeagueId = typeof league_id === 'string' && UUID_RE.test(league_id) ? league_id : null;
+
+  // Ignore the literal string "undefined" for all params
+  const validPosition = position && position !== 'undefined' ? position : null;
+  const validSearch = search && search !== 'undefined' ? search : null;
+  const validTeam = team && team !== 'undefined' ? team : null;
+
+  if (process.env.NODE_ENV === 'development') {
+    console.log('[players] GET /', { position: validPosition, search: validSearch, league_id: validLeagueId ? validLeagueId.slice(0, 8) + '...' : null });
+  }
+
   const params: unknown[] = [];
   const where: string[] = ['1=1'];
 
-  if (position) { params.push(position);         where.push(`p.position = $${params.length}`); }
-  if (team)     { params.push(team);             where.push(`p.nfl_team = $${params.length}`); }
-  if (search)   { params.push(`%${search}%`);   where.push(`p.full_name ILIKE $${params.length}`); }
+  if (validPosition) { params.push(validPosition); where.push(`p.position = $${params.length}`); }
+  if (validTeam)     { params.push(validTeam);     where.push(`p.nfl_team = $${params.length}`); }
+  if (validSearch)   { params.push(`%${validSearch}%`); where.push(`p.full_name ILIKE $${params.length}`); }
 
   let sql: string;
-  if (league_id) {
-    params.push(league_id);
+  if (validLeagueId) {
+    params.push(validLeagueId);
     const lgParam = params.length;
     // Subquery scopes the roster join to this league only — prevents duplicate
     // rows when a player appears in multiple leagues' rosters.
@@ -58,10 +71,15 @@ router.get('/', async (req: Request, res: Response) => {
            LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
   }
 
-  params.push(parseInt(limit as string), parseInt(offset as string));
+  params.push(parseInt(limit as string) || 50, parseInt(offset as string) || 0);
 
-  const { rows } = await query(sql, params);
-  res.json(rows);
+  try {
+    const { rows } = await query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('[players] Query failed:', (err as Error).message);
+    res.status(500).json({ error: 'Failed to fetch players' });
+  }
 });
 
 // GET /api/players/nfl/state — current NFL week / season

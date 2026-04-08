@@ -10,18 +10,19 @@ import {
 const router = Router();
 router.use(authenticate);
 
+// Note: Draft start is commissioner-enforced inside startDraft() service
+// (checks league.commissioner_id === userId). Middleware can't be used here
+// because the route param is :leagueId, not :id as requireCommissioner expects.
+
 // =============================================
 // POST /api/draft/:leagueId/start
-// Body: { total_rounds?, seconds_per_pick? }
+// Rounds and timer are derived from league settings.
 // Commissioner only.
 // =============================================
 router.post('/:leagueId/start', async (req: AuthRequest, res: Response): Promise<void> => {
   const leagueId = req.params.leagueId as string;
   try {
-    const result = await startDraft(leagueId, req.user!.id, {
-      total_rounds:     req.body.total_rounds,
-      seconds_per_pick: req.body.seconds_per_pick,
-    });
+    const result = await startDraft(leagueId, req.user!.id);
     res.status(201).json(result);
   } catch (err) {
     const e = err as Error & { status?: number };

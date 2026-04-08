@@ -225,7 +225,8 @@ router.post('/mock-draft', requireAdminSecret, async (req: Request, res: Respons
   // ------------------------------------------------------------------
   // 4. Start draft (1-second timer so auto-pick fires immediately)
   // ------------------------------------------------------------------
-  await startDraft(leagueId, userIds[0], { total_rounds: totalRounds, seconds_per_pick: 1 });
+  // Rounds and timer are now derived from league settings
+  await startDraft(leagueId, userIds[0]);
   console.log(`${tag} Draft started`);
 
   // ------------------------------------------------------------------

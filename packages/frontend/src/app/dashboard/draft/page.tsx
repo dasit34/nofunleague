@@ -130,7 +130,7 @@ export default function DraftPage() {
                   setStarting(true);
                   setStartErr('');
                   try {
-                    await draftApi.start(leagueId, { total_rounds: draftRounds, seconds_per_pick: 90 });
+                    await draftApi.start(leagueId);
                     await mutateState();
                   } catch (e) {
                     setStartErr((e as Error).message);

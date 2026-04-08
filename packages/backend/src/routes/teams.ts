@@ -2,22 +2,25 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import {
+  generateSlotNames,
+  allowedPositionsForSlot,
+  isStarterSlot,
+  totalRosterSize,
+  type RosterSettings,
+} from '../config/leagueSettings';
+import { getSettings } from '../services/settingsService';
+import { validateRosterAdd, setWaiverLock } from '../services/rosterValidation';
 
 const router = Router();
 
 // =============================================
-// Roster slot definitions
+// Helper: get roster settings for a league
 // =============================================
-const VALID_SLOTS = ['QB', 'RB1', 'RB2', 'WR1', 'WR2', 'TE', 'FLEX', 'BN1', 'BN2', 'BN3', 'BN4', 'BN5', 'BN6'];
-const STARTER_SLOTS = ['QB', 'RB1', 'RB2', 'WR1', 'WR2', 'TE', 'FLEX'];
-const SLOT_POSITIONS: Record<string, string[]> = {
-  QB:  ['QB'],
-  RB1: ['RB'], RB2: ['RB'],
-  WR1: ['WR'], WR2: ['WR'],
-  TE:  ['TE'],
-  FLEX: ['RB', 'WR', 'TE'],
-  BN1: [], BN2: [], BN3: [], BN4: [], BN5: [], BN6: [],
-};
+async function getLeagueRosterSettings(leagueId: string): Promise<RosterSettings> {
+  const settings = await getSettings(leagueId);
+  return settings.roster;
+}
 
 // =============================================
 // Helper: log a roster transaction
@@ -34,25 +37,32 @@ async function logTransaction(
 }
 
 // =============================================
-// Helper: return full roster for a team
+// Helper: return full roster for a team, ordered by league slot config
 // =============================================
-async function getFullRoster(teamId: string) {
+async function getFullRoster(teamId: string, leagueId: string) {
+  const rosterSettings = await getLeagueRosterSettings(leagueId);
+  const slotOrder = generateSlotNames(rosterSettings);
+  // Build a map: slot name → sort index
+  const slotIndex = new Map<string, number>();
+  slotOrder.forEach((slot, i) => slotIndex.set(slot, i));
+
   const { rows } = await query(
     `SELECT p.id, p.full_name, p.position, p.nfl_team, p.status, p.injury_status, p.jersey_number,
             p.age, p.years_exp,
             r.is_starter, r.roster_slot, r.acquisition_type, r.acquisition_week
      FROM rosters r JOIN players p ON p.id = r.player_id
      WHERE r.team_id = $1
-     ORDER BY
-       CASE r.roster_slot
-         WHEN 'QB' THEN 1 WHEN 'RB1' THEN 2 WHEN 'RB2' THEN 3
-         WHEN 'WR1' THEN 4 WHEN 'WR2' THEN 5 WHEN 'TE' THEN 6
-         WHEN 'FLEX' THEN 7 WHEN 'BN1' THEN 8 WHEN 'BN2' THEN 9
-         WHEN 'BN3' THEN 10 WHEN 'BN4' THEN 11 WHEN 'BN5' THEN 12
-         WHEN 'BN6' THEN 13 ELSE 20 END,
-       p.full_name`,
+     ORDER BY p.full_name`,
     [teamId]
   );
+
+  // Sort by slot position in the league's configuration, unassigned last
+  rows.sort((a: { roster_slot: string | null }, b: { roster_slot: string | null }) => {
+    const ai = a.roster_slot ? (slotIndex.get(a.roster_slot) ?? 999) : 998;
+    const bi = b.roster_slot ? (slotIndex.get(b.roster_slot) ?? 999) : 998;
+    return ai - bi;
+  });
+
   return rows;
 }
 
@@ -123,7 +133,7 @@ router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   );
   if (!team) { res.status(404).json({ error: 'Team not found' }); return; }
 
-  const roster = await getFullRoster(req.params.id as string);
+  const roster = await getFullRoster(req.params.id as string, team.league_id as string);
   const lineup_locked = (team.lineup_locked_week as number) >= (team.league_week as number);
 
   res.json({ ...team, roster, lineup_locked });
@@ -185,7 +195,7 @@ router.patch('/:id/roster', authenticate, async (req: AuthRequest, res: Response
     );
   }
 
-  const roster = await getFullRoster(team.id);
+  const roster = await getFullRoster(team.id, team.league_id);
   res.json({ message: 'Roster updated', roster });
 });
 
@@ -231,16 +241,18 @@ router.get('/:id/matchup-history', authenticate, async (req: AuthRequest, res: R
 
 // =============================================
 // PATCH /api/teams/:id/roster/slot — assign player to slot
+// Slot validity and position eligibility read from league settings.
 // =============================================
 router.patch('/:id/roster/slot', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
-  const SlotSchema = z.object({
+  // Validate player_id is present; slot validated below against league settings
+  const BaseSchema = z.object({
     player_id: z.string().min(1),
-    slot: z.enum(VALID_SLOTS as [string, ...string[]]),
+    slot: z.string().min(1),
   });
 
-  let body: z.infer<typeof SlotSchema>;
+  let body: z.infer<typeof BaseSchema>;
   try {
-    body = SlotSchema.parse(req.body);
+    body = BaseSchema.parse(req.body);
   } catch (err) {
     if (err instanceof z.ZodError) {
       res.status(400).json({ error: 'Validation failed', details: err.errors });
@@ -254,6 +266,16 @@ router.patch('/:id/roster/slot', authenticate, async (req: AuthRequest, res: Res
     [req.params.id as string, req.user!.id]
   );
   if (!team) { res.status(403).json({ error: 'Team not found or you do not own it' }); return; }
+
+  // Get league roster settings — source of truth for valid slots
+  const rosterSettings = await getLeagueRosterSettings(team.league_id);
+  const validSlots = generateSlotNames(rosterSettings);
+
+  // Validate slot against league config
+  if (!validSlots.includes(body.slot)) {
+    res.status(400).json({ error: `Invalid slot: ${body.slot}. Valid slots: ${validSlots.join(', ')}` });
+    return;
+  }
 
   // Lock check
   const lock = await checkLineupLock(team.id);
@@ -270,10 +292,11 @@ router.patch('/:id/roster/slot', authenticate, async (req: AuthRequest, res: Res
   );
   if (!rosterEntry) { res.status(404).json({ error: 'Player is not on your roster' }); return; }
 
-  const allowedPositions = SLOT_POSITIONS[body.slot];
-  if (allowedPositions && allowedPositions.length > 0 && !allowedPositions.includes(rosterEntry.position)) {
+  // Position eligibility from league settings
+  const allowed = allowedPositionsForSlot(body.slot, rosterSettings.flex_types);
+  if (allowed.length > 0 && !allowed.includes(rosterEntry.position)) {
     res.status(400).json({
-      error: `Cannot assign ${rosterEntry.position} to ${body.slot}. Allowed: ${allowedPositions.join(', ')}`,
+      error: `Cannot assign ${rosterEntry.position} to ${body.slot}. Allowed: ${allowed.join(', ')}`,
     });
     return;
   }
@@ -288,24 +311,25 @@ router.patch('/:id/roster/slot', authenticate, async (req: AuthRequest, res: Res
   if (occupant && occupant.player_id !== body.player_id) {
     await query(
       'UPDATE rosters SET roster_slot = $1, is_starter = $2 WHERE team_id = $3 AND player_id = $4',
-      [oldSlot, oldSlot ? STARTER_SLOTS.includes(oldSlot) : false, team.id, occupant.player_id]
+      [oldSlot, oldSlot ? isStarterSlot(oldSlot) : false, team.id, occupant.player_id]
     );
   }
 
-  const isStarter = STARTER_SLOTS.includes(body.slot);
+  const starter = isStarterSlot(body.slot);
   await query(
     'UPDATE rosters SET roster_slot = $1, is_starter = $2 WHERE team_id = $3 AND player_id = $4',
-    [body.slot, isStarter, team.id, body.player_id]
+    [body.slot, starter, team.id, body.player_id]
   );
 
   await logTransaction(team.league_id, req.user!.id, team.id, body.player_id, 'move', `${oldSlot || 'unassigned'} → ${body.slot}`);
 
-  const roster = await getFullRoster(team.id);
+  const roster = await getFullRoster(team.id, team.league_id);
   res.json({ message: 'Slot updated', roster });
 });
 
 // =============================================
 // POST /api/teams/:id/add — add free agent
+// Enforces roster size cap and position limits from league settings.
 // =============================================
 router.post('/:id/add', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
   const { player_id } = req.body as { player_id?: string };
@@ -326,27 +350,13 @@ router.post('/:id/add', authenticate, async (req: AuthRequest, res: Response): P
     return;
   }
 
-  const { rows: [player] } = await query('SELECT id, full_name FROM players WHERE id = $1', [player_id]);
-  if (!player) { res.status(404).json({ error: 'Player not found' }); return; }
-
-  const { rows: [taken] } = await query(
-    `SELECT r.team_id, t.name AS team_name FROM rosters r
-     JOIN teams t ON t.id = r.team_id
-     WHERE r.player_id = $1 AND t.league_id = $2`,
-    [player_id, team.league_id]
-  );
-  if (taken) { res.status(409).json({ error: `Player is already rostered by ${taken.team_name}` }); return; }
-
-  const { rows: occupied } = await query(
-    `SELECT roster_slot FROM rosters WHERE team_id = $1 AND roster_slot LIKE 'BN%'`,
-    [team.id]
-  );
-  const occupiedSlots = new Set(occupied.map((r: { roster_slot: string }) => r.roster_slot));
-  let benchSlot: string | null = null;
-  for (let i = 1; i <= 6; i++) {
-    if (!occupiedSlots.has(`BN${i}`)) { benchSlot = `BN${i}`; break; }
+  // Shared validation: roster capacity, position limits, waiver lock, bench slot
+  const validation = await validateRosterAdd(team.league_id, team.id, player_id, { checkWaiverLock: true });
+  if (!validation.valid) {
+    res.status(400).json({ error: validation.error });
+    return;
   }
-  if (!benchSlot) { res.status(400).json({ error: 'No available bench slots. Drop a player first.' }); return; }
+  const benchSlot = validation.benchSlot!;
 
   await query(
     `INSERT INTO rosters (team_id, player_id, acquisition_type, acquisition_week, is_starter, roster_slot)
@@ -418,6 +428,15 @@ router.delete('/:id/drop/:playerId', authenticate, async (req: AuthRequest, res:
   if (!rosterEntry) { res.status(404).json({ error: 'Player not on your roster' }); return; }
 
   await query('DELETE FROM rosters WHERE team_id = $1 AND player_id = $2', [teamId, playerId]);
+
+  // Set waiver lock on dropped player (if league is in season and waiver period > 0)
+  const { rows: [leagueRow] } = await query('SELECT status FROM leagues WHERE id = $1', [team.league_id]);
+  if (leagueRow && (leagueRow.status === 'in_season' || leagueRow.status === 'post_season')) {
+    const settings = await getSettings(team.league_id);
+    if (settings.waivers.waiver_period_days > 0) {
+      await setWaiverLock(team.league_id, playerId, teamId, settings.waivers.waiver_period_days);
+    }
+  }
 
   await logTransaction(
     team.league_id, req.user!.id, teamId, playerId, 'drop',

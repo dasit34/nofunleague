@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { leagues as leaguesApi, invites as invitesApi, teams as teamsApi, draft as draftApi } from '@/lib/api';
 import { useAuthStore, useLeagueStore } from '@/lib/store';
 import type { League, Team, LeagueMember, LeagueInvite, Transaction, WaiverClaim } from '@/types';
+import { getRosterFromSettings, draftRounds as calcDraftRounds } from '@/types';
 
 export default function LeaguePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -39,7 +40,9 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
   const [joinName, setJoinName] = useState('');
   const [joinLoading, setJoinLoading] = useState(false);
   const [joinErr, setJoinErr] = useState('');
-  const [draftRounds, setDraftRounds] = useState(10);
+  const rosterSettings = league ? getRosterFromSettings(league.settings) : null;
+  const computedRounds = rosterSettings ? calcDraftRounds(rosterSettings) : 13;
+  const [draftRounds, setDraftRounds] = useState(computedRounds);
   const [draftStarting, setDraftStarting] = useState(false);
   const [draftStartErr, setDraftStartErr] = useState('');
   const [errMsg, setErrMsg] = useState('');
@@ -105,7 +108,7 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
     setDraftStarting(true);
     setDraftStartErr('');
     try {
-      await draftApi.start(id, { total_rounds: draftRounds, seconds_per_pick: 90 });
+      await draftApi.start(id);
       setActiveLeague(league);
       router.push('/dashboard/draft');
     } catch (err) {
@@ -200,18 +203,10 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
           {league.status === 'pre_draft' && (
             <div className="space-y-2 border-t border-white/10 pt-4">
               <label className="text-white/60 text-xs font-semibold uppercase tracking-wider block">Start Draft</label>
+              <p className="text-white/40 text-xs">{draftRounds} rounds (based on {computedRounds} roster slots) · Snake format</p>
               <div className="flex gap-2 items-center flex-wrap">
-                <select
-                  className="input-dark py-2 text-sm w-32"
-                  value={draftRounds}
-                  onChange={(e) => setDraftRounds(parseInt(e.target.value))}
-                >
-                  {[5, 6, 7, 8, 10, 12, 15].map((n) => (
-                    <option key={n} value={n}>{n} rounds</option>
-                  ))}
-                </select>
                 <button onClick={handleStartDraft} disabled={draftStarting || teams.length < 2} className="btn-gold text-sm py-2 px-4">
-                  {draftStarting ? 'Starting...' : 'Start Draft'}
+                  {draftStarting ? 'Starting...' : `Start Draft (${draftRounds} rounds)`}
                 </button>
               </div>
               {teams.length < 2 && <p className="text-white/40 text-xs">Need at least 2 teams to start.</p>}
@@ -362,9 +357,9 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
       </div>
 
       {/* Recent Activity */}
-      {transactions && transactions.length > 0 && (
-        <div>
-          <h2 className="text-white font-black text-lg mb-4">Recent Activity</h2>
+      <div>
+        <h2 className="text-white font-black text-lg mb-4">Recent Activity</h2>
+        {transactions && transactions.length > 0 ? (
           <div className="card space-y-0 p-0 divide-y divide-white/5">
             {transactions.map((tx) => (
               <div key={tx.id} className="px-4 py-3 flex items-center gap-3">
@@ -387,8 +382,12 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
               </div>
             ))}
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="card text-center py-8">
+            <p className="text-white/30 text-sm">No activity yet. Roster moves, adds, and drops will appear here.</p>
+          </div>
+        )}
+      </div>
 
       {/* Waiver Activity */}
       {waiverActivity && waiverActivity.length > 0 && (
@@ -421,12 +420,12 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
       )}
 
       {/* Standings preview */}
-      {teams.length > 0 && (
-        <div>
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-white font-black text-lg">Standings</h2>
-            <Link href={`/dashboard/leagues/${id}/standings`} className="text-gold text-sm hover:underline">View full →</Link>
-          </div>
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-white font-black text-lg">Standings</h2>
+          <Link href={`/dashboard/leagues/${id}/standings`} className="text-gold text-sm hover:underline">View full →</Link>
+        </div>
+        {teams.length > 0 ? (
           <div className="card overflow-hidden p-0">
             <table className="w-full">
               <thead>
@@ -462,8 +461,12 @@ export default function LeaguePage({ params }: { params: Promise<{ id: string }>
               </tbody>
             </table>
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="card text-center py-8">
+            <p className="text-white/30 text-sm">No teams yet. Invite members to join and standings will appear here.</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

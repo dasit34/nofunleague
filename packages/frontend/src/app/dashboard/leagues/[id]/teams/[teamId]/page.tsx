@@ -4,34 +4,81 @@ import useSWR from 'swr';
 import Link from 'next/link';
 import { teams as teamsApi, leagues as leaguesApi } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
-import type { Team, RosterPlayer, AvailablePlayer, WaiverClaim } from '@/types';
+import type { League, Team, RosterPlayer, WaiverClaim, RosterSettings } from '@/types';
+import { getRosterFromSettings, totalRosterSize, starterCount } from '@/types';
 
-// Ordered roster layout
-const ROSTER_SLOTS = [
-  { slot: 'QB',   label: 'QB',   positions: ['QB'] },
-  { slot: 'RB1',  label: 'RB',   positions: ['RB'] },
-  { slot: 'RB2',  label: 'RB',   positions: ['RB'] },
-  { slot: 'WR1',  label: 'WR',   positions: ['WR'] },
-  { slot: 'WR2',  label: 'WR',   positions: ['WR'] },
-  { slot: 'TE',   label: 'TE',   positions: ['TE'] },
-  { slot: 'FLEX', label: 'FLEX', positions: ['RB', 'WR', 'TE'] },
-];
+// ─── Build slot definitions from league roster settings ─────────────────────
 
-const BENCH_SLOTS = [
-  { slot: 'BN1', label: 'BN' },
-  { slot: 'BN2', label: 'BN' },
-  { slot: 'BN3', label: 'BN' },
-  { slot: 'BN4', label: 'BN' },
-  { slot: 'BN5', label: 'BN' },
-  { slot: 'BN6', label: 'BN' },
-];
+interface SlotDef { slot: string; label: string; isStarter: boolean }
+
+type SlotSection = 'starter' | 'bench' | 'ir';
+
+function buildSlots(r: RosterSettings): (SlotDef & { section: SlotSection })[] {
+  const slots: (SlotDef & { section: SlotSection })[] = [];
+  const push = (prefix: string, count: number, label: string, section: SlotSection) => {
+    for (let i = 1; i <= count; i++) slots.push({ slot: count === 1 ? prefix : `${prefix}${i}`, label, isStarter: section === 'starter', section });
+  };
+  push('QB', r.qb_slots, 'QB', 'starter');
+  push('RB', r.rb_slots, 'RB', 'starter');
+  push('WR', r.wr_slots, 'WR', 'starter');
+  push('TE', r.te_slots, 'TE', 'starter');
+  push('FLEX', r.flex_slots, 'FLEX', 'starter');
+  push('SUPERFLEX', r.superflex_slots || 0, 'SF', 'starter');
+  push('DEF', r.def_slots, 'D/ST', 'starter');
+  push('K', r.k_slots, 'K', 'starter');
+  push('BN', r.bench_slots, 'BE', 'bench');
+  push('IR', r.ir_slots || 0, 'IR', 'ir');
+  return slots;
+}
+
+function getAllowedSlots(position: string, rosterSettings: RosterSettings): string[] {
+  const slots: string[] = [];
+  const r = rosterSettings;
+  const push = (prefix: string, count: number) => {
+    for (let i = 1; i <= count; i++) slots.push(count === 1 ? prefix : `${prefix}${i}`);
+  };
+  // Position-specific starter slots
+  if (position === 'QB') push('QB', r.qb_slots);
+  if (position === 'RB') push('RB', r.rb_slots);
+  if (position === 'WR') push('WR', r.wr_slots);
+  if (position === 'TE') push('TE', r.te_slots);
+  if (position === 'K') push('K', r.k_slots);
+  if (position === 'DEF') push('DEF', r.def_slots);
+  // FLEX: RB/WR/TE eligible (or QB too if flex_types includes QB)
+  if (['RB', 'WR', 'TE'].includes(position) || (r.flex_types === 'QB_RB_WR_TE' && position === 'QB')) {
+    push('FLEX', r.flex_slots);
+  }
+  // SUPERFLEX: QB/RB/WR/TE eligible
+  if (['QB', 'RB', 'WR', 'TE'].includes(position)) {
+    push('SUPERFLEX', r.superflex_slots || 0);
+  }
+  // Bench: any position
+  push('BN', r.bench_slots);
+  // IR: any position
+  push('IR', r.ir_slots || 0);
+  return slots;
+}
+
+// ─── Position colors ────────────────────────────────────────────────────────
+
+const POS_COLORS: Record<string, string> = {
+  QB: 'text-red-400', RB: 'text-green-400', WR: 'text-blue-400',
+  TE: 'text-orange-400', FLEX: 'text-purple-400', SF: 'text-purple-400',
+  'D/ST': 'text-yellow-400', DEF: 'text-yellow-400', K: 'text-cyan-400',
+  BE: 'text-white/20', IR: 'text-white/20',
+};
+
+// ─── Types ──────────────────────────────────────────────────────────────────
 
 type TeamWithRoster = Team & {
   roster: RosterPlayer[];
   lineup_locked: boolean;
   league_week: number;
   lineup_locked_week: number;
+  league_status: string;
 };
+
+// ─── Page ───────────────────────────────────────────────────────────────────
 
 export default function TeamRosterPage({
   params,
@@ -40,6 +87,11 @@ export default function TeamRosterPage({
 }) {
   const { id: leagueId, teamId } = use(params);
   const { user } = useAuthStore();
+
+  const { data: league } = useSWR(
+    `/leagues/${leagueId}`,
+    () => leaguesApi.get(leagueId) as Promise<League>
+  );
 
   const { data: team, mutate, isLoading } = useSWR(
     `/teams/${teamId}`,
@@ -51,7 +103,36 @@ export default function TeamRosterPage({
   const canEdit = isOwner && !isLocked;
   const roster = team?.roster || [];
 
-  // Pending waiver claims for this team's league
+  // Roster settings from league config
+  const rosterSettings = league ? getRosterFromSettings(league.settings) : null;
+  const allSlots = rosterSettings ? buildSlots(rosterSettings) : [];
+  const starterSlots = allSlots.filter(s => s.section === 'starter');
+  const benchSlots = allSlots.filter(s => s.section === 'bench');
+  const irSlots = allSlots.filter(s => s.section === 'ir');
+  const totalSlots = rosterSettings ? totalRosterSize(rosterSettings) : 0;
+  const starterSlotCount = rosterSettings ? starterCount(rosterSettings) : 0;
+  const filledCount = roster.length;
+
+  // Player weekly scores — fetch team scores for the most recently completed week
+  const currentWeek = team?.league_week || league?.week || 1;
+  const lastScoredWeek = currentWeek > 1 ? currentWeek - 1 : 0;
+  const { data: weekScores } = useSWR(
+    team && lastScoredWeek > 0 ? `/teams/${teamId}/scores` : null,
+    () => teamsApi.scores(teamId) as Promise<{ week: number; player_scores: { player_id: string; points: number }[] }[]>
+  );
+
+  // Build player→points map for the last scored week
+  const playerScoreMap = new Map<string, number>();
+  if (weekScores) {
+    const lastWeekData = weekScores.find(ws => ws.week === lastScoredWeek);
+    if (lastWeekData?.player_scores) {
+      for (const ps of lastWeekData.player_scores) {
+        playerScoreMap.set(ps.player_id, ps.points);
+      }
+    }
+  }
+
+  // Waiver claims
   const { data: myClaims, mutate: mutateClaims } = useSWR(
     isOwner && leagueId ? `/leagues/${leagueId}/waivers/my-claims` : null,
     () => leaguesApi.waiverMyClaims(leagueId)
@@ -61,245 +142,328 @@ export default function TeamRosterPage({
   const slotMap = new Map<string, RosterPlayer>();
   const unslotted: RosterPlayer[] = [];
   for (const p of roster) {
-    if (p.roster_slot) {
-      slotMap.set(p.roster_slot, p);
-    } else {
-      unslotted.push(p);
-    }
+    if (p.roster_slot) slotMap.set(p.roster_slot, p);
+    else unslotted.push(p);
   }
 
-  // State for add player modal
+  // Add player modal state
   const [showAdd, setShowAdd] = useState(false);
   const [addSearch, setAddSearch] = useState('');
   const [addPosition, setAddPosition] = useState('');
   const [addLoading, setAddLoading] = useState(false);
   const [addErr, setAddErr] = useState('');
+  const [actionErr, setActionErr] = useState('');
+  const [actionLoading, setActionLoading] = useState('');
 
   const { data: available } = useSWR(
     showAdd ? `/teams/${teamId}/available?pos=${addPosition}&q=${addSearch}` : null,
     () => teamsApi.available(teamId, {
-      position: addPosition || undefined,
-      search: addSearch || undefined,
+      ...(addPosition ? { position: addPosition } : {}),
+      ...(addSearch ? { search: addSearch } : {}),
       limit: 30,
     })
   );
 
-  const [actionErr, setActionErr] = useState('');
-  const [actionLoading, setActionLoading] = useState('');
-
   async function handleMoveToSlot(playerId: string, slot: string) {
-    setActionLoading(playerId);
-    setActionErr('');
-    try {
-      await teamsApi.setSlot(teamId, playerId, slot);
-      mutate();
-    } catch (err) {
-      setActionErr((err as Error).message);
-    } finally {
-      setActionLoading('');
-    }
+    setActionLoading(playerId); setActionErr('');
+    try { await teamsApi.setSlot(teamId, playerId, slot); mutate(); }
+    catch (err) { setActionErr((err as Error).message); }
+    finally { setActionLoading(''); }
   }
 
   async function handleAddPlayer(playerId: string) {
-    setAddLoading(true);
-    setAddErr('');
-    try {
-      await teamsApi.addPlayer(teamId, playerId);
-      mutate();
-      setShowAdd(false);
-      setAddSearch('');
-      setAddPosition('');
-    } catch (err) {
-      setAddErr((err as Error).message);
-    } finally {
-      setAddLoading(false);
-    }
+    setAddLoading(true); setAddErr('');
+    try { await teamsApi.addPlayer(teamId, playerId); mutate(); setShowAdd(false); setAddSearch(''); setAddPosition(''); }
+    catch (err) { setAddErr((err as Error).message); }
+    finally { setAddLoading(false); }
   }
 
   async function handleDropPlayer(playerId: string) {
-    setActionLoading(playerId);
-    setActionErr('');
-    try {
-      await teamsApi.dropPlayer(teamId, playerId);
-      mutate();
-    } catch (err) {
-      setActionErr((err as Error).message);
-    } finally {
-      setActionLoading('');
-    }
+    setActionLoading(playerId); setActionErr('');
+    try { await teamsApi.dropPlayer(teamId, playerId); mutate(); }
+    catch (err) { setActionErr((err as Error).message); }
+    finally { setActionLoading(''); }
   }
 
   if (isLoading) {
-    return (
-      <div className="p-6">
-        <div className="card text-center text-white/40 py-12">Loading roster...</div>
-      </div>
-    );
+    return <div className="p-6"><div className="card text-center text-white/40 py-12">Loading roster...</div></div>;
   }
-
   if (!team) {
     return (
-      <div className="p-6">
-        <div className="card text-center text-white/40 py-12">
-          Team not found. <Link href={`/dashboard/leagues/${leagueId}/teams`} className="text-gold">Back to teams</Link>
-        </div>
-      </div>
+      <div className="p-6"><div className="card text-center text-white/40 py-12">
+        Team not found. <Link href={`/dashboard/leagues/${leagueId}/teams`} className="text-gold">Back to teams</Link>
+      </div></div>
     );
   }
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <Link href={`/dashboard/leagues/${leagueId}/teams`} className="text-white/40 text-xs hover:text-gold transition-colors">
-            ← Back to Teams
-          </Link>
-          <h2 className="text-white font-black text-lg mt-1">{team.name}</h2>
-          <p className="text-white/40 text-sm">
-            {team.display_name ? `Owner: ${team.display_name}` : ''}
-            {' · '}
-            {team.wins}-{team.losses}{team.ties > 0 ? `-${team.ties}` : ''} · {Number(team.points_for).toFixed(1)} PF
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {/* Lock status badge */}
-          {isLocked ? (
-            <span className="px-3 py-1.5 rounded text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30">
-              Lineup Locked — Week {team.league_week}
-            </span>
-          ) : (
-            <span className="px-3 py-1.5 rounded text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30">
-              Lineup Editable
-            </span>
-          )}
-          {canEdit && (
-            <button onClick={() => setShowAdd(true)} className="btn-gold text-sm py-2 px-4">
-              + Add Player
-            </button>
-          )}
+    <div className="p-6 space-y-5">
+      {/* ── Header ────────────────────────────────────────────────────── */}
+      <div>
+        <Link href={`/dashboard/leagues/${leagueId}/teams`} className="text-white/30 text-xs hover:text-gold transition-colors">← Back to Teams</Link>
+
+        <div className="flex items-center justify-between flex-wrap gap-3 mt-2">
+          <div>
+            <h2 className="text-white font-black text-xl">{team.name}</h2>
+            <p className="text-white/40 text-sm">
+              {team.display_name && <span>Manager: {team.display_name} · </span>}
+              <span className="font-mono">{team.wins}-{team.losses}{team.ties > 0 ? `-${team.ties}` : ''}</span>
+              <span className="text-white/20 mx-2">·</span>
+              <span>{Number(team.points_for).toFixed(1)} PF</span>
+              <span className="text-white/20 mx-2">·</span>
+              <span>Week {team.league_week || league?.week || 1}</span>
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {isLocked ? (
+              <span className="px-3 py-1.5 rounded text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30">
+                Lineup Locked
+              </span>
+            ) : (
+              <span className="px-3 py-1.5 rounded text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30">
+                Lineup Editable
+              </span>
+            )}
+            {canEdit && (
+              <button onClick={() => setShowAdd(true)} className="btn-gold text-sm py-2 px-4">+ Add Player</button>
+            )}
+          </div>
         </div>
       </div>
 
-      {actionErr && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">{actionErr}</div>
+      {/* ── Roster summary bar ────────────────────────────────────────── */}
+      <div className="flex gap-4 text-xs text-white/30 flex-wrap">
+        <span>Roster: <span className="text-white font-bold">{filledCount}/{totalSlots}</span></span>
+        <span>Starters: <span className="text-gold font-bold">{starterSlotCount}</span></span>
+        <span>Bench: <span className="text-white font-bold">{benchSlots.length}</span></span>
+        {irSlots.length > 0 && <span>IR: <span className="text-white font-bold">{irSlots.length}</span></span>}
+        {lastScoredWeek > 0 && <span>Scores: <span className="text-white/40">Week {lastScoredWeek}</span></span>}
+        <span className="text-white/10">Only starters score</span>
+      </div>
+
+      {actionErr && <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">{actionErr}</div>}
+
+      {/* ── Starters ──────────────────────────────────────────────────── */}
+      <div>
+        <h3 className="text-gold font-black text-xs uppercase tracking-wider mb-2">Starters</h3>
+        <div className="card overflow-hidden p-0">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-white/10">
+                <th className="text-left text-white/30 text-xs uppercase tracking-wider px-4 py-2 w-14">Slot</th>
+                <th className="text-left text-white/30 text-xs uppercase tracking-wider px-4 py-2">Player</th>
+                <th className="text-right text-white/30 text-xs uppercase tracking-wider px-4 py-2 w-16">Pts</th>
+                {canEdit && <th className="text-right text-white/30 text-xs uppercase tracking-wider px-4 py-2 w-32"></th>}
+              </tr>
+            </thead>
+            <tbody>
+              {starterSlots.map((s) => {
+                const player = slotMap.get(s.slot);
+                return (
+                  <tr key={s.slot} className={`border-b border-white/5 ${player ? 'hover:bg-white/[0.03]' : ''} transition-colors`}>
+                    <td className="px-4 py-3">
+                      <span className={`text-xs font-bold ${POS_COLORS[s.label] || 'text-white/40'}`}>{s.label}</span>
+                    </td>
+                    <td className="px-4 py-3">
+                      {player ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-white text-sm font-semibold">{player.full_name}</span>
+                          <span className="text-white/20 text-xs">{player.nfl_team}</span>
+                          {player.injury_status && <span className="text-red-400 text-xs font-bold">{player.injury_status}</span>}
+                        </div>
+                      ) : (
+                        <span className="text-white/15 text-sm italic">Empty {s.label}</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {player ? (() => {
+                        const pts = playerScoreMap.get(player.id);
+                        return pts !== undefined
+                          ? <span className="font-mono text-sm text-gold font-bold">{pts.toFixed(1)}</span>
+                          : <span className="font-mono text-sm text-white/15">—</span>;
+                      })() : <span className="font-mono text-sm text-white/10">—</span>}
+                    </td>
+                    {canEdit && (
+                      <td className="px-4 py-3 text-right">
+                        {player && rosterSettings && (
+                          <div className="flex items-center justify-end gap-1">
+                            <select className="input-dark py-0.5 text-xs w-20" value=""
+                              onChange={(e) => { if (e.target.value) handleMoveToSlot(player.id, e.target.value); }}
+                              disabled={actionLoading === player.id}>
+                              <option value="">Move</option>
+                              {getAllowedSlots(player.position, rosterSettings).filter(sl => sl !== s.slot).map(sl => (
+                                <option key={sl} value={sl}>{sl}</option>
+                              ))}
+                            </select>
+                            <button onClick={() => handleDropPlayer(player.id)} disabled={actionLoading === player.id}
+                              className="text-red-400/40 hover:text-red-400 text-xs transition-colors">Drop</button>
+                          </div>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ── Bench ─────────────────────────────────────────────────────── */}
+      <div>
+        <h3 className="text-white/40 font-black text-xs uppercase tracking-wider mb-2">Bench</h3>
+        <div className="card overflow-hidden p-0">
+          <table className="w-full">
+            <tbody>
+              {benchSlots.map((s) => {
+                const player = slotMap.get(s.slot);
+                return (
+                  <tr key={s.slot} className={`border-b border-white/5 ${player ? 'hover:bg-white/[0.03]' : ''} transition-colors`}>
+                    <td className="px-4 py-2.5 w-14">
+                      <span className="text-white/15 text-xs font-bold">BE</span>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      {player ? (
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold ${POS_COLORS[player.position] || 'text-white/30'}`}>{player.position}</span>
+                          <span className="text-white/60 text-sm">{player.full_name}</span>
+                          <span className="text-white/15 text-xs">{player.nfl_team}</span>
+                        </div>
+                      ) : (
+                        <span className="text-white/10 text-sm italic">Empty BE</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-right w-16">
+                      {player ? (() => {
+                        const pts = playerScoreMap.get(player.id);
+                        return pts !== undefined
+                          ? <span className="font-mono text-xs text-white/30">{pts.toFixed(1)}</span>
+                          : <span className="font-mono text-xs text-white/10">—</span>;
+                      })() : <span className="font-mono text-xs text-white/10">—</span>}
+                    </td>
+                    {canEdit && (
+                      <td className="px-4 py-2.5 text-right w-32">
+                        {player && rosterSettings && (
+                          <div className="flex items-center justify-end gap-1">
+                            <select className="input-dark py-0.5 text-xs w-20" value=""
+                              onChange={(e) => { if (e.target.value) handleMoveToSlot(player.id, e.target.value); }}
+                              disabled={actionLoading === player.id}>
+                              <option value="">Move</option>
+                              {getAllowedSlots(player.position, rosterSettings).filter(sl => sl !== s.slot).map(sl => (
+                                <option key={sl} value={sl}>{sl}</option>
+                              ))}
+                            </select>
+                            <button onClick={() => handleDropPlayer(player.id)} disabled={actionLoading === player.id}
+                              className="text-red-400/40 hover:text-red-400 text-xs transition-colors">Drop</button>
+                          </div>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ── IR ──────────────────────────────────────────────────────── */}
+      {irSlots.length > 0 && (
+        <div>
+          <h3 className="text-white/30 font-black text-xs uppercase tracking-wider mb-2">Injured Reserve</h3>
+          <div className="card overflow-hidden p-0">
+            <table className="w-full">
+              <tbody>
+                {irSlots.map((s) => {
+                  const player = slotMap.get(s.slot);
+                  return (
+                    <tr key={s.slot} className={`border-b border-white/5 ${player ? 'hover:bg-white/[0.03]' : ''} transition-colors`}>
+                      <td className="px-4 py-2.5 w-14">
+                        <span className="text-white/15 text-xs font-bold">IR</span>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        {player ? (
+                          <div className="flex items-center gap-2">
+                            <span className={`text-xs font-bold ${POS_COLORS[player.position] || 'text-white/30'}`}>{player.position}</span>
+                            <span className="text-white/60 text-sm">{player.full_name}</span>
+                            <span className="text-white/15 text-xs">{player.nfl_team}</span>
+                            {player.injury_status && <span className="text-red-400 text-xs font-bold">{player.injury_status}</span>}
+                          </div>
+                        ) : (
+                          <span className="text-white/10 text-sm italic">Empty IR</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-right w-16">
+                        <span className="text-white/10 font-mono text-xs">IR</span>
+                      </td>
+                      {canEdit && (
+                        <td className="px-4 py-2.5 text-right w-32">
+                          {player && rosterSettings && (
+                            <div className="flex items-center justify-end gap-1">
+                              <select className="input-dark py-0.5 text-xs w-20" value=""
+                                onChange={(e) => { if (e.target.value) handleMoveToSlot(player.id, e.target.value); }}
+                                disabled={actionLoading === player.id}>
+                                <option value="">Move</option>
+                                {getAllowedSlots(player.position, rosterSettings).filter(sl => sl !== s.slot).map(sl => (
+                                  <option key={sl} value={sl}>{sl}</option>
+                                ))}
+                              </select>
+                              <button onClick={() => handleDropPlayer(player.id)} disabled={actionLoading === player.id}
+                                className="text-red-400/40 hover:text-red-400 text-xs transition-colors">Drop</button>
+                            </div>
+                          )}
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
-      {/* Scoring note */}
-      <div className="text-white/30 text-xs">
-        Only players in <span className="text-gold font-semibold">starter slots</span> (QB, RB, WR, TE, FLEX) contribute to your weekly score. Bench players do not score.
-      </div>
-
-      {/* Starters */}
-      <div>
-        <h3 className="text-gold font-black text-sm uppercase tracking-wider mb-3">
-          Starters <span className="text-white/30 font-normal">(scoring)</span>
-        </h3>
-        <div className="space-y-2">
-          {ROSTER_SLOTS.map(({ slot, label }) => {
-            const player = slotMap.get(slot);
-            return (
-              <RosterSlotRow
-                key={slot}
-                slot={slot}
-                label={label}
-                player={player}
-                canEdit={canEdit}
-                actionLoading={actionLoading}
-                roster={roster}
-                onMove={handleMoveToSlot}
-                onDrop={handleDropPlayer}
-              />
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Bench */}
-      <div>
-        <h3 className="text-white/60 font-black text-sm uppercase tracking-wider mb-3">
-          Bench <span className="text-white/20 font-normal">(not scoring)</span>
-        </h3>
-        <div className="space-y-2">
-          {BENCH_SLOTS.map(({ slot, label }) => {
-            const player = slotMap.get(slot);
-            return (
-              <RosterSlotRow
-                key={slot}
-                slot={slot}
-                label={label}
-                player={player}
-                canEdit={canEdit}
-                actionLoading={actionLoading}
-                roster={roster}
-                onMove={handleMoveToSlot}
-                onDrop={handleDropPlayer}
-              />
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Pending Waiver Claims */}
+      {/* ── Waiver Claims ─────────────────────────────────────────────── */}
       {isOwner && myClaims && myClaims.length > 0 && (
         <div>
-          <h3 className="text-gold font-black text-sm uppercase tracking-wider mb-3">
-            Pending Waiver Claims ({myClaims.length})
-          </h3>
-          <div className="space-y-2">
+          <h3 className="text-gold font-black text-xs uppercase tracking-wider mb-2">Pending Claims ({myClaims.length})</h3>
+          <div className="card overflow-hidden p-0">
             {myClaims.map((c: WaiverClaim) => (
-              <div key={c.id} className="card py-2 px-4 flex items-center justify-between border-gold/20">
-                <div className="flex items-center gap-3">
-                  <span className="text-gold text-xs font-mono w-10 font-bold">CLAIM</span>
-                  <PlayerBadge player={{ full_name: c.player_name, position: c.player_position, nfl_team: c.player_nfl_team }} />
+              <div key={c.id} className="px-4 py-2.5 border-b border-white/5 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-bold ${POS_COLORS[c.player_position || ''] || 'text-white/30'}`}>{c.player_position}</span>
+                  <span className="text-white text-sm">{c.player_name}</span>
+                  <span className="text-white/20 text-xs">{c.player_nfl_team}</span>
                 </div>
-                <button
-                  onClick={async () => {
-                    try {
-                      await leaguesApi.waiverCancel(leagueId, c.id);
-                      mutateClaims();
-                    } catch {}
-                  }}
-                  className="text-red-400/60 hover:text-red-400 text-xs transition-colors"
-                >
-                  Cancel
-                </button>
+                <button onClick={async () => { try { await leaguesApi.waiverCancel(leagueId, c.id); mutateClaims(); } catch {} }}
+                  className="text-red-400/40 hover:text-red-400 text-xs transition-colors">Cancel</button>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* Unslotted */}
+      {/* ── Unslotted ─────────────────────────────────────────────────── */}
       {unslotted.length > 0 && (
         <div>
-          <h3 className="text-white/40 font-black text-sm uppercase tracking-wider mb-3">Unassigned</h3>
-          <div className="space-y-2">
+          <h3 className="text-white/30 font-black text-xs uppercase tracking-wider mb-2">Unassigned ({unslotted.length})</h3>
+          <div className="card overflow-hidden p-0">
             {unslotted.map((player) => (
-              <div key={player.id} className="card py-2 px-4 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="text-white/20 text-xs font-mono w-10">—</span>
-                  <PlayerBadge player={player} />
+              <div key={player.id} className="px-4 py-2.5 border-b border-white/5 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-bold ${POS_COLORS[player.position] || 'text-white/30'}`}>{player.position}</span>
+                  <span className="text-white/60 text-sm">{player.full_name}</span>
                 </div>
-                {canEdit && (
-                  <div className="flex gap-2">
-                    <select
-                      className="input-dark py-1 text-xs w-24"
-                      defaultValue=""
-                      onChange={(e) => { if (e.target.value) handleMoveToSlot(player.id, e.target.value); }}
-                    >
-                      <option value="">Move to...</option>
-                      {getAllowedSlots(player.position).map((s) => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
+                {canEdit && rosterSettings && (
+                  <div className="flex gap-1">
+                    <select className="input-dark py-0.5 text-xs w-20" defaultValue=""
+                      onChange={(e) => { if (e.target.value) handleMoveToSlot(player.id, e.target.value); }}>
+                      <option value="">Move</option>
+                      {getAllowedSlots(player.position, rosterSettings).map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
-                    <button
-                      onClick={() => handleDropPlayer(player.id)}
-                      disabled={actionLoading === player.id}
-                      className="text-red-400/60 hover:text-red-400 text-xs transition-colors"
-                    >
-                      Drop
-                    </button>
+                    <button onClick={() => handleDropPlayer(player.id)} disabled={actionLoading === player.id}
+                      className="text-red-400/40 hover:text-red-400 text-xs transition-colors">Drop</button>
                   </div>
                 )}
               </div>
@@ -308,7 +472,7 @@ export default function TeamRosterPage({
         </div>
       )}
 
-      {/* Add Player Modal */}
+      {/* ── Add Player Modal ──────────────────────────────────────────── */}
       {showAdd && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setShowAdd(false)}>
           <div className="card w-full max-w-lg max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
@@ -316,139 +480,35 @@ export default function TeamRosterPage({
               <h3 className="text-white font-black text-lg">Add Free Agent</h3>
               <button onClick={() => setShowAdd(false)} className="text-white/40 hover:text-white text-lg">✕</button>
             </div>
-
-            {addErr && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 mb-4 text-red-400 text-sm">{addErr}</div>
-            )}
-
+            {addErr && <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 mb-4 text-red-400 text-sm">{addErr}</div>}
             <div className="flex gap-2 mb-4">
-              <input
-                type="text"
-                placeholder="Search player..."
-                className="input-dark flex-1 py-2 text-sm"
-                value={addSearch}
-                onChange={(e) => setAddSearch(e.target.value)}
-              />
-              <select
-                className="input-dark py-2 text-sm w-24"
-                value={addPosition}
-                onChange={(e) => setAddPosition(e.target.value)}
-              >
+              <input type="text" placeholder="Search..." className="input-dark flex-1 py-2 text-sm"
+                value={addSearch} onChange={(e) => setAddSearch(e.target.value)} />
+              <select className="input-dark py-2 text-sm w-24" value={addPosition} onChange={(e) => setAddPosition(e.target.value)}>
                 <option value="">All</option>
-                <option value="QB">QB</option>
-                <option value="RB">RB</option>
-                <option value="WR">WR</option>
-                <option value="TE">TE</option>
-                <option value="K">K</option>
-                <option value="DEF">DEF</option>
+                <option value="QB">QB</option><option value="RB">RB</option>
+                <option value="WR">WR</option><option value="TE">TE</option>
+                <option value="K">K</option><option value="DEF">DEF</option>
               </select>
             </div>
-
             <div className="space-y-1">
               {available?.map((p) => (
                 <div key={p.id} className="flex items-center justify-between py-2 px-3 rounded hover:bg-white/5 transition-colors">
-                  <PlayerBadge player={p} />
+                  <div className="flex items-center gap-2">
+                    <span className={`text-xs font-bold ${POS_COLORS[p.position] || 'text-white/30'}`}>{p.position}</span>
+                    <span className="text-white text-sm">{p.full_name}</span>
+                    <span className="text-white/20 text-xs">{p.nfl_team}</span>
+                  </div>
                   <button onClick={() => handleAddPlayer(p.id)} disabled={addLoading} className="btn-gold text-xs py-1 px-3">
                     {addLoading ? '...' : 'Add'}
                   </button>
                 </div>
-              )) || (
-                <p className="text-white/30 text-sm text-center py-4">Loading players...</p>
-              )}
-              {available?.length === 0 && (
-                <p className="text-white/30 text-sm text-center py-4">No available players found.</p>
-              )}
+              )) || <p className="text-white/30 text-sm text-center py-4">Loading...</p>}
+              {available?.length === 0 && <p className="text-white/30 text-sm text-center py-4">No players found.</p>}
             </div>
           </div>
         </div>
       )}
     </div>
   );
-}
-
-// ─── Sub-components ─────────────────────────────────────────────────────────
-
-function RosterSlotRow({
-  slot, label, player, canEdit, actionLoading, roster, onMove, onDrop,
-}: {
-  slot: string; label: string; player: RosterPlayer | undefined;
-  canEdit: boolean; actionLoading: string; roster: RosterPlayer[];
-  onMove: (playerId: string, slot: string) => void;
-  onDrop: (playerId: string) => void;
-}) {
-  const isStarter = !slot.startsWith('BN');
-
-  return (
-    <div className={`card py-2 px-4 flex items-center justify-between ${!player ? 'opacity-50' : ''}`}>
-      <div className="flex items-center gap-3">
-        <span className={`text-xs font-mono w-10 font-bold ${isStarter ? 'text-gold' : 'text-white/30'}`}>
-          {label}
-        </span>
-        {player ? (
-          <PlayerBadge player={player} />
-        ) : (
-          <span className="text-white/20 text-sm italic">Empty</span>
-        )}
-      </div>
-
-      {canEdit && player && (
-        <div className="flex gap-2 items-center">
-          <select
-            className="input-dark py-1 text-xs w-24"
-            value=""
-            onChange={(e) => { if (e.target.value) onMove(player.id, e.target.value); }}
-            disabled={actionLoading === player.id}
-          >
-            <option value="">Move to...</option>
-            {getAllowedSlots(player.position)
-              .filter((s) => s !== slot)
-              .map((s) => {
-                const occupant = roster.find((p) => p.roster_slot === s);
-                return (
-                  <option key={s} value={s}>
-                    {s}{occupant ? ` (swap: ${occupant.full_name?.split(' ').pop()})` : ''}
-                  </option>
-                );
-              })}
-          </select>
-          <button
-            onClick={() => onDrop(player.id)}
-            disabled={actionLoading === player.id}
-            className="text-red-400/60 hover:text-red-400 text-xs transition-colors"
-          >
-            Drop
-          </button>
-        </div>
-      )}
-
-      {!canEdit && player && isStarter && (
-        <span className="text-gold/40 text-xs">scoring</span>
-      )}
-    </div>
-  );
-}
-
-function PlayerBadge({ player }: { player: { full_name?: string; position?: string; nfl_team?: string; injury_status?: string } }) {
-  const posColors: Record<string, string> = {
-    QB: 'text-red-400', RB: 'text-green-400', WR: 'text-blue-400',
-    TE: 'text-orange-400', K: 'text-purple-400', DEF: 'text-yellow-400',
-  };
-  return (
-    <div className="flex items-center gap-2">
-      <span className={`text-xs font-bold ${posColors[player.position || ''] || 'text-white/40'}`}>{player.position}</span>
-      <span className="text-white text-sm font-semibold">{player.full_name}</span>
-      <span className="text-white/30 text-xs">{player.nfl_team}</span>
-      {player.injury_status && <span className="text-red-400 text-xs font-bold">{player.injury_status}</span>}
-    </div>
-  );
-}
-
-function getAllowedSlots(position: string): string[] {
-  const slots: string[] = [];
-  const map: Record<string, string[]> = {
-    QB: ['QB'], RB: ['RB1', 'RB2', 'FLEX'], WR: ['WR1', 'WR2', 'FLEX'], TE: ['TE', 'FLEX'],
-  };
-  slots.push(...(map[position] || []));
-  for (let i = 1; i <= 6; i++) slots.push(`BN${i}`);
-  return slots;
 }

@@ -17,18 +17,21 @@ const STATUS_STYLES: Record<string, string> = {
 
 // ─── Trade Card ────────────────────────────────────────────────────────────
 function TradeCard({
-  trade, myTeamId, isCommissioner, onRespond, onApprove,
+  trade, myTeamId, isCommissioner, onRespond, onApprove, onCancel,
 }: {
   trade: Trade; myTeamId?: string; isCommissioner: boolean;
   onRespond?: (id: string, action: 'accept' | 'reject') => void;
   onApprove?: (id: string, action: 'approve' | 'veto') => void;
+  onCancel?: (id: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const propItems = trade.items.filter((i) => i.from_team_id === trade.proposing_team_id);
   const recvItems = trade.items.filter((i) => i.from_team_id === trade.receiving_team_id);
+  const isProposer = myTeamId === trade.proposing_team_id;
   const isReceiver = myTeamId === trade.receiving_team_id;
   const canRespond = trade.status === 'pending' && isReceiver && !!onRespond;
   const canApprove = trade.status === 'accepted' && isCommissioner && !!onApprove;
+  const canCancel = trade.status === 'pending' && isProposer && !!onCancel;
 
   return (
     <div className="card space-y-4">
@@ -85,6 +88,13 @@ function TradeCard({
         <div className="flex gap-2 border-t border-white/10 pt-3">
           <button onClick={async () => { setBusy(true); onApprove?.(trade.id, 'approve'); setBusy(false); }} disabled={busy} className="btn-gold flex-1 text-sm py-2">Approve</button>
           <button onClick={async () => { setBusy(true); onApprove?.(trade.id, 'veto'); setBusy(false); }} disabled={busy} className="border border-red-500/40 text-red-400 hover:bg-red-500/10 font-semibold px-4 py-2 rounded-lg transition-all text-sm flex-1">Veto</button>
+        </div>
+      )}
+
+      {canCancel && (
+        <div className="border-t border-white/10 pt-3">
+          <button onClick={async () => { setBusy(true); onCancel?.(trade.id); setBusy(false); }} disabled={busy}
+            className="text-white/30 hover:text-red-400 text-xs transition-colors">Cancel Trade</button>
         </div>
       )}
     </div>
@@ -214,6 +224,7 @@ export default function LeagueTradesPage({ params }: { params: Promise<{ id: str
   const { user } = useAuthStore();
   const [tab, setTab] = useState<Tab>('inbox');
   const [successMsg, setSuccessMsg] = useState('');
+  const [actionErr, setActionErr] = useState('');
 
   const { data: leagueData } = useSWR(
     `/leagues/${leagueId}`,
@@ -237,13 +248,21 @@ export default function LeagueTradesPage({ params }: { params: Promise<{ id: str
   function refreshAll() { mutateInbox(); mutateHistory(); mutateApproval(); }
 
   async function handleRespond(tradeId: string, action: 'accept' | 'reject') {
+    setActionErr('');
     try { await tradesApi.respond(tradeId, action); refreshAll(); }
-    catch (err) { alert((err as Error).message); }
+    catch (err) { setActionErr((err as Error).message); }
   }
 
   async function handleApprove(tradeId: string, action: 'approve' | 'veto') {
+    setActionErr('');
     try { await tradesApi.approve(tradeId, action); refreshAll(); }
-    catch (err) { alert((err as Error).message); }
+    catch (err) { setActionErr((err as Error).message); }
+  }
+
+  async function handleCancel(tradeId: string) {
+    setActionErr('');
+    try { await tradesApi.cancel(tradeId); refreshAll(); }
+    catch (err) { setActionErr((err as Error).message); }
   }
 
   const tabDefs: { id: Tab; label: string; count?: number; hidden?: boolean }[] = [
@@ -272,6 +291,13 @@ export default function LeagueTradesPage({ params }: { params: Promise<{ id: str
         ))}
       </div>
 
+      {actionErr && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm flex items-center justify-between">
+          {actionErr}
+          <button onClick={() => setActionErr('')} className="text-red-400/60 hover:text-red-400 ml-4">✕</button>
+        </div>
+      )}
+
       {successMsg && (
         <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-3 text-green-400 text-sm flex items-center justify-between">
           {successMsg}
@@ -299,7 +325,7 @@ export default function LeagueTradesPage({ params }: { params: Promise<{ id: str
               {myTeam && <button onClick={() => setTab('propose')} className="mt-3 text-gold text-sm hover:text-gold/70">Propose a trade →</button>}
             </div>
           ) : inboxTrades.map((trade) => (
-            <TradeCard key={trade.id} trade={trade} myTeamId={myTeam?.id} isCommissioner={isCommissioner} onRespond={handleRespond} />
+            <TradeCard key={trade.id} trade={trade} myTeamId={myTeam?.id} isCommissioner={isCommissioner} onRespond={handleRespond} onCancel={handleCancel} />
           ))}
         </div>
       )}

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { requireCommissioner } from '../middleware/commissioner';
+import { validateRosterAdd } from '../services/rosterValidation';
 
 const router = Router();
 
@@ -27,18 +28,12 @@ router.post('/:id/waivers/claim', authenticate, async (req: AuthRequest, res: Re
   );
   if (!team) { res.status(403).json({ error: 'You do not have a team in this league' }); return; }
 
-  // Player must exist
-  const { rows: [player] } = await query('SELECT id, full_name FROM players WHERE id = $1', [body.player_id]);
-  if (!player) { res.status(404).json({ error: 'Player not found' }); return; }
-
-  // Player must not already be rostered in this league
-  const { rows: [rostered] } = await query(
-    `SELECT t.name FROM rosters r JOIN teams t ON t.id = r.team_id
-     WHERE r.player_id = $1 AND t.league_id = $2`,
-    [body.player_id, leagueId]
-  );
-  if (rostered) {
-    res.status(409).json({ error: `Player is already rostered by ${rostered.name}` });
+  // Shared validation: player exists, not rostered, roster capacity, position limits
+  const validation = await validateRosterAdd(leagueId, team.id, body.player_id);
+  if (!validation.valid) {
+    // Map specific errors to appropriate status codes
+    const isConflict = validation.error?.includes('already rostered');
+    res.status(isConflict ? 409 : 400).json({ error: validation.error });
     return;
   }
 
@@ -50,16 +45,6 @@ router.post('/:id/waivers/claim', authenticate, async (req: AuthRequest, res: Re
   );
   if (existing) {
     res.status(409).json({ error: 'You already have a pending claim for this player' });
-    return;
-  }
-
-  // Check bench space
-  const { rows: benchRows } = await query(
-    `SELECT roster_slot FROM rosters WHERE team_id = $1 AND roster_slot LIKE 'BN%'`,
-    [team.id]
-  );
-  if (benchRows.length >= 6) {
-    res.status(400).json({ error: 'No available bench slots. Drop a player first.' });
     return;
   }
 
@@ -166,6 +151,8 @@ router.post('/:id/waivers/process', authenticate, requireCommissioner, async (re
     return;
   }
 
+  // Validation is done per-candidate inside the loop via validateRosterAdd()
+
   // Group by player_id
   const byPlayer = new Map<string, typeof claims>();
   for (const c of claims) {
@@ -198,31 +185,32 @@ router.post('/:id/waivers/process', authenticate, requireCommissioner, async (re
       continue;
     }
 
-    // Winner = first claim (lowest waiver_priority due to ORDER BY)
-    const winner = playerClaims[0];
-
-    // Check bench space for winner
-    const { rows: benchRows } = await query(
-      `SELECT roster_slot FROM rosters WHERE team_id = $1 AND roster_slot LIKE 'BN%'`,
-      [winner.team_id]
-    );
-    const occupiedSlots = new Set(benchRows.map((r: { roster_slot: string }) => r.roster_slot));
+    // Find the first team in priority order that passes full validation
+    let winnerIndex = -1;
     let benchSlot: string | null = null;
-    for (let i = 1; i <= 6; i++) {
-      if (!occupiedSlots.has(`BN${i}`)) { benchSlot = `BN${i}`; break; }
+
+    for (let ci = 0; ci < playerClaims.length; ci++) {
+      const candidate = playerClaims[ci];
+      const validation = await validateRosterAdd(leagueId, candidate.team_id, playerId);
+      if (validation.valid && validation.benchSlot) {
+        winnerIndex = ci;
+        benchSlot = validation.benchSlot;
+        break;
+      }
+      // This candidate fails validation — reject their claim and try next
+      await query(
+        `UPDATE waiver_claims SET status = 'rejected', processed_at = NOW() WHERE id = $1`,
+        [candidate.id]
+      );
+      rejected++;
     }
 
-    if (!benchSlot) {
-      // Winner has no space — reject all for this player
-      for (const c of playerClaims) {
-        await query(
-          `UPDATE waiver_claims SET status = 'rejected', processed_at = NOW() WHERE id = $1`,
-          [c.id]
-        );
-        rejected++;
-      }
+    if (winnerIndex < 0 || !benchSlot) {
+      // No team passed validation — remaining claims already rejected in loop
       continue;
     }
+
+    const winner = playerClaims[winnerIndex];
 
     // Approve winner
     await query(
@@ -249,8 +237,8 @@ router.post('/:id/waivers/process', authenticate, requireCommissioner, async (re
     winnersTeamIds.push(winner.team_id);
     approved++;
 
-    // Reject remaining claims for this player
-    for (let i = 1; i < playerClaims.length; i++) {
+    // Reject remaining claims for this player (after the winner)
+    for (let i = winnerIndex + 1; i < playerClaims.length; i++) {
       await query(
         `UPDATE waiver_claims SET status = 'rejected', processed_at = NOW() WHERE id = $1`,
         [playerClaims[i].id]

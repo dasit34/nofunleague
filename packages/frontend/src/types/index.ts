@@ -13,6 +13,179 @@ export interface User {
   created_at: string;
 }
 
+// =============================================
+// Roster Settings
+// =============================================
+
+export type FlexType = 'RB_WR' | 'RB_WR_TE' | 'QB_RB_WR_TE';
+
+export interface RosterSettings {
+  qb_slots: number;
+  rb_slots: number;
+  wr_slots: number;
+  te_slots: number;
+  flex_slots: number;
+  flex_types: FlexType;
+  superflex_slots: number;
+  k_slots: number;
+  def_slots: number;
+  bench_slots: number;
+  ir_slots: number;
+  max_qb: number;
+  max_rb: number;
+  max_wr: number;
+  max_te: number;
+  max_k: number;
+  max_def: number;
+}
+
+export const DEFAULT_ROSTER_SETTINGS: RosterSettings = {
+  qb_slots: 1, rb_slots: 2, wr_slots: 2, te_slots: 1,
+  flex_slots: 1, flex_types: 'RB_WR_TE', superflex_slots: 0,
+  k_slots: 0, def_slots: 0, bench_slots: 6, ir_slots: 0,
+  max_qb: 0, max_rb: 0, max_wr: 0, max_te: 0, max_k: 0, max_def: 0,
+};
+
+// =============================================
+// Full League Settings (matches backend canonical model)
+// =============================================
+
+export interface ScoringSettings {
+  type: 'standard' | 'half_ppr' | 'ppr' | 'custom';
+  source: 'mock' | 'real';
+  // Per-stat scoring values
+  pass_yd: number; pass_td: number; pass_int: number; pass_2pt: number;
+  rush_yd: number; rush_td: number; rush_2pt: number;
+  rec: number; rec_yd: number; rec_td: number; rec_2pt: number;
+  fum_lost: number;
+  fg_0_19: number; fg_20_29: number; fg_30_39: number; fg_40_49: number; fg_50p: number;
+  xpt: number; xpt_miss: number;
+  def_sack: number; def_int: number; def_fum_rec: number;
+  def_td: number; def_st_td: number; def_safe: number; def_blk_kick: number;
+  def_pts_allow_0: number; def_pts_allow_1_6: number; def_pts_allow_7_13: number;
+  def_pts_allow_14_20: number; def_pts_allow_21_27: number; def_pts_allow_28_34: number; def_pts_allow_35p: number;
+}
+
+export interface DraftSettings {
+  type: 'snake' | 'linear';
+  seconds_per_pick: number;
+  auto_pick_on_timeout: boolean;
+}
+
+export interface TradeSettings {
+  approval_type: 'commissioner' | 'league_vote' | 'none';
+  review_period_hours: number;
+  trade_deadline_week: number;
+  votes_to_veto: number;
+  allow_draft_pick_trades: boolean;
+}
+
+export interface WaiverSettings {
+  type: 'standard' | 'faab' | 'none';
+  waiver_period_days: number;
+  faab_budget: number;
+  process_day: 'tuesday' | 'wednesday' | 'daily';
+}
+
+export interface SeasonSettings {
+  regular_season_weeks: number;
+  playoff_start_week: number;
+  schedule_type: 'round_robin' | 'random';
+}
+
+export interface PlayoffSettings {
+  teams: number;
+  weeks_per_round: 1 | 2;
+  reseed: boolean;
+  consolation_bracket: boolean;
+}
+
+export interface LeagueSettings {
+  roster: RosterSettings;
+  scoring: ScoringSettings;
+  draft: DraftSettings;
+  trades: TradeSettings;
+  waivers: WaiverSettings;
+  season: SeasonSettings;
+  playoffs: PlayoffSettings;
+}
+
+export const DEFAULT_LEAGUE_SETTINGS: LeagueSettings = {
+  roster: { ...DEFAULT_ROSTER_SETTINGS },
+  scoring: {
+    type: 'half_ppr', source: 'mock',
+    pass_yd: 0.04, pass_td: 4, pass_int: -2, pass_2pt: 2,
+    rush_yd: 0.1, rush_td: 6, rush_2pt: 2,
+    rec: 0.5, rec_yd: 0.1, rec_td: 6, rec_2pt: 2,
+    fum_lost: -2,
+    fg_0_19: 3, fg_20_29: 3, fg_30_39: 3, fg_40_49: 4, fg_50p: 5,
+    xpt: 1, xpt_miss: -1,
+    def_sack: 1, def_int: 2, def_fum_rec: 2, def_td: 6, def_st_td: 6, def_safe: 2, def_blk_kick: 2,
+    def_pts_allow_0: 10, def_pts_allow_1_6: 7, def_pts_allow_7_13: 4,
+    def_pts_allow_14_20: 1, def_pts_allow_21_27: 0, def_pts_allow_28_34: -1, def_pts_allow_35p: -4,
+  },
+  draft: { type: 'snake', seconds_per_pick: 90, auto_pick_on_timeout: true },
+  trades: { approval_type: 'commissioner', review_period_hours: 24, trade_deadline_week: 0, votes_to_veto: 4, allow_draft_pick_trades: false },
+  waivers: { type: 'standard', waiver_period_days: 2, faab_budget: 100, process_day: 'wednesday' },
+  season: { regular_season_weeks: 14, playoff_start_week: 15, schedule_type: 'round_robin' },
+  playoffs: { teams: 4, weeks_per_round: 1, reseed: false, consolation_bracket: false },
+};
+
+export function getRosterFromSettings(settings: Record<string, unknown>): RosterSettings {
+  const r = settings?.roster as Partial<RosterSettings> | undefined;
+  if (!r) return { ...DEFAULT_ROSTER_SETTINGS };
+  return { ...DEFAULT_ROSTER_SETTINGS, ...r };
+}
+
+export function getLeagueSettings(settings: Record<string, unknown>): LeagueSettings {
+  if (!settings) return { ...DEFAULT_LEAGUE_SETTINGS };
+  function merge<T>(def: T, raw: unknown): T {
+    if (!raw || typeof raw !== 'object') return { ...def };
+    const result: Record<string, unknown> = { ...(def as Record<string, unknown>) };
+    for (const key of Object.keys(result)) {
+      const val = (raw as Record<string, unknown>)[key];
+      if (val !== undefined && val !== null) result[key] = val;
+    }
+    return result as T;
+  }
+  return {
+    roster:   merge<RosterSettings>(DEFAULT_ROSTER_SETTINGS, settings.roster),
+    scoring:  merge<ScoringSettings>(DEFAULT_LEAGUE_SETTINGS.scoring, settings.scoring),
+    draft:    merge<DraftSettings>(DEFAULT_LEAGUE_SETTINGS.draft, settings.draft),
+    trades:   merge<TradeSettings>(DEFAULT_LEAGUE_SETTINGS.trades, settings.trades),
+    waivers:  merge<WaiverSettings>(DEFAULT_LEAGUE_SETTINGS.waivers, settings.waivers),
+    season:   merge<SeasonSettings>(DEFAULT_LEAGUE_SETTINGS.season, settings.season),
+    playoffs: merge<PlayoffSettings>(DEFAULT_LEAGUE_SETTINGS.playoffs, settings.playoffs),
+  };
+}
+
+export function totalRosterSize(r: RosterSettings): number {
+  return r.qb_slots + r.rb_slots + r.wr_slots + r.te_slots
+    + r.flex_slots + (r.superflex_slots || 0) + r.k_slots + r.def_slots
+    + r.bench_slots + (r.ir_slots || 0);
+}
+
+export function starterCount(r: RosterSettings): number {
+  return r.qb_slots + r.rb_slots + r.wr_slots + r.te_slots
+    + r.flex_slots + (r.superflex_slots || 0) + r.k_slots + r.def_slots;
+}
+
+export function draftRounds(r: RosterSettings): number {
+  return starterCount(r) + r.bench_slots;
+}
+
+/** Safe format: league status for display. Never crashes on undefined. */
+export function formatStatus(status?: string | null): string {
+  if (!status) return 'Unknown';
+  return status.replace(/_/g, ' ');
+}
+
+/** Safe format: scoring type for display. */
+export function formatScoringType(type?: string | null): string {
+  if (!type) return 'Standard';
+  return type.replace(/_/g, ' ').toUpperCase();
+}
+
 export interface League {
   id: string;
   name: string;
@@ -31,7 +204,7 @@ export interface League {
   scoring_source: 'mock' | 'real';
   created_at: string;
   teams?: Team[];
-  team_name?: string; // current user's team name
+  team_name?: string;
 }
 
 export interface Team {

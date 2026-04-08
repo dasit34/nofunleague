@@ -1,4 +1,4 @@
-import type { User, Trade, RosterPlayer, AvailablePlayer, Transaction, WaiverClaim } from '@/types';
+import type { User, Trade, RosterPlayer, AvailablePlayer, Transaction, WaiverClaim, RosterSettings, LeagueSettings, Matchup } from '@/types';
 
 // Empty string → relative paths → Next.js dev proxy routes to localhost:3001 (no CORS).
 // In production, set NEXT_PUBLIC_API_URL to the full backend URL (e.g. Railway).
@@ -19,6 +19,7 @@ function handleUnauthenticated() {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${path}`;
+  const method = options.method || 'GET';
   const token = getToken();
 
   let res: Response;
@@ -32,12 +33,17 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       },
     });
   } catch (networkErr) {
-    // Network error, CORS failure, or DNS failure — fetch itself threw
-    const msg = (networkErr as Error).message || 'Network error';
-    console.error(`[API] ${options.method || 'GET'} ${url} → NETWORK ERROR: ${msg}`);
-    throw new Error(`Cannot reach server: ${msg}`);
+    // fetch() itself threw — network down, CORS blocked, or DNS failure
+    const raw = (networkErr as Error).message || 'Network error';
+    console.error(`[API] ${method} ${url} → NETWORK ERROR: ${raw}`);
+    // User-friendly message — "Load failed" / "Failed to fetch" means CORS or offline
+    if (raw.includes('Load failed') || raw.includes('Failed to fetch') || raw.includes('NetworkError')) {
+      throw new Error('Unable to connect to the server. This is usually a network or CORS issue.');
+    }
+    throw new Error(`Connection failed: ${raw}`);
   }
 
+  // Parse body once — used by all error branches
   if (res.status === 401) {
     const body = await res.json().catch(() => ({ code: '' }));
     if (body.code === 'TOKEN_EXPIRED' || body.code === 'INVALID_TOKEN' || body.code === 'NO_TOKEN') {
@@ -48,10 +54,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    console.error(`[API] ${options.method || 'GET'} ${url} → ${res.status}:`, err.error || err);
-    const apiErr = Object.assign(new Error(err.error || `HTTP ${res.status}`), err);
-    throw apiErr;
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    const serverMsg = body.error || body.message || '';
+    console.error(`[API] ${method} ${url} → ${res.status}: ${serverMsg}`);
+
+    // Build a clear, user-facing message that includes the status code
+    const userMsg = serverMsg
+      ? `${serverMsg} (${res.status})`
+      : `Server error (${res.status})`;
+    throw Object.assign(new Error(userMsg), body);
   }
 
   return res.json();
@@ -115,8 +126,37 @@ export const auth = {
 export const leagues = {
   list: () => request<unknown[]>('/api/leagues'),
 
-  create: (data: { name: string; sleeper_league_id?: string; season?: number; league_size?: number; scoring_type?: string; scoring_source?: string }) =>
+  create: (data: { name: string; sleeper_league_id?: string; season?: number; league_size?: number; scoring_type?: string; scoring_source?: string; roster_settings?: RosterSettings }) =>
     request<unknown>('/api/leagues', { method: 'POST', body: JSON.stringify(data) }),
+
+  updateRosterSettings: (id: string, settings: RosterSettings) =>
+    request<{ message: string; settings: LeagueSettings }>(`/api/leagues/${id}/settings/roster`, {
+      method: 'PATCH', body: JSON.stringify(settings),
+    }),
+
+  getSettings: (id: string) =>
+    request<LeagueSettings>(`/api/leagues/${id}/settings`),
+
+  updateSettings: (id: string, section: keyof LeagueSettings, data: unknown) =>
+    request<{ message: string; settings: LeagueSettings }>(`/api/leagues/${id}/settings/${section}`, {
+      method: 'PATCH', body: JSON.stringify(data),
+    }),
+
+  // Commissioner correction tools
+  commissionerTransfer: (id: string, data: { player_id: string; from_team_id: string; to_team_id: string }) =>
+    request<{ message: string; player_id: string; slot: string }>(`/api/leagues/${id}/commissioner/transfer`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+
+  commissionerRosterAction: (id: string, data: { team_id: string; action: 'add' | 'drop'; player_id: string }) =>
+    request<{ message: string; player_id: string }>(`/api/leagues/${id}/commissioner/roster-action`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+
+  commissionerEditScore: (id: string, matchupId: string, data: { home_score: number; away_score: number }) =>
+    request<{ message: string; matchup_id: string; standings_corrected: boolean }>(`/api/leagues/${id}/commissioner/matchup/${matchupId}`, {
+      method: 'PATCH', body: JSON.stringify(data),
+    }),
 
   get: (id: string) => request<unknown>(`/api/leagues/${id}`),
 
@@ -130,8 +170,27 @@ export const leagues = {
     request<{ message: string; week: number; scoring_format: string; synced_rosters: number; linked_users: number }>(
       `/api/leagues/${id}/sync-sleeper`, { method: 'POST' }),
 
-  update: (id: string, data: { week?: number; status?: string }) =>
+  update: (id: string, data: { name?: string; season?: number; week?: number; status?: string }) =>
     request<unknown>(`/api/leagues/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+  getMatchupScores: (id: string, matchupId: string) =>
+    request<{
+      matchup: Matchup;
+      home: { total: number; players: { playerId: string; points: number; isStarter: boolean; statBreakdown: Record<string, number> }[] } | null;
+      away: { total: number; players: { playerId: string; points: number; isStarter: boolean; statBreakdown: Record<string, number> }[] } | null;
+    }>(`/api/leagues/${id}/matchups/${matchupId}/scores`),
+
+  getStandings: (id: string) =>
+    request<{
+      league_id: string;
+      week: number;
+      status: string;
+      standings: {
+        rank: number; team_id: string; team_name: string; user_id: string; display_name: string | null;
+        wins: number; losses: number; ties: number; record: string;
+        points_for: number; points_against: number;
+      }[];
+    }>(`/api/leagues/${id}/standings`),
 
   getMatchups: (id: string, week: number) =>
     request<unknown[]>(`/api/leagues/${id}/matchups/${week}`),
@@ -146,7 +205,7 @@ export const leagues = {
     ),
 
   simulateWeek: (id: string) =>
-    request<{ message: string; week: number; scoring_source: string; matchups_scored: number; next_week: number }>(
+    request<{ message: string; week: number; scoring_source: string; matchups_scored: number; next_week: number; warning?: string | null }>(
       `/api/leagues/${id}/simulate-week`, { method: 'POST' }
     ),
 
@@ -240,7 +299,14 @@ export const teams = {
 // =============================================
 export const players = {
   list: (params?: { position?: string; team?: string; search?: string; limit?: number; league_id?: string }) => {
-    const qs = new URLSearchParams(params as Record<string, string>).toString();
+    // Strip undefined/empty values so URLSearchParams doesn't serialize them as "undefined"
+    const clean: Record<string, string> = {};
+    if (params) {
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') clean[k] = String(v);
+      }
+    }
+    const qs = new URLSearchParams(clean).toString();
     return request<unknown[]>(`/api/players${qs ? `?${qs}` : ''}`);
   },
   get: (id: string) => request<unknown>(`/api/players/${id}`),
@@ -315,8 +381,8 @@ export const invites = {
 // Draft
 // =============================================
 export const draft = {
-  start: (leagueId: string, data?: { total_rounds?: number; seconds_per_pick?: number }) =>
-    request<unknown>(`/api/draft/${leagueId}/start`, { method: 'POST', body: JSON.stringify(data || {}) }),
+  start: (leagueId: string) =>
+    request<unknown>(`/api/draft/${leagueId}/start`, { method: 'POST' }),
 
   getState: (leagueId: string) =>
     request<unknown>(`/api/draft/${leagueId}/state`),
@@ -363,4 +429,7 @@ export const trades = {
       method: 'POST',
       body: JSON.stringify({ action, commissioner_note }),
     }),
+
+  cancel: (tradeId: string) =>
+    request<Trade>(`/api/trades/${tradeId}/cancel`, { method: 'POST' }),
 };

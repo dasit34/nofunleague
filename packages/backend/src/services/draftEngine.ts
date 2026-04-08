@@ -1,5 +1,12 @@
 import { Server } from 'socket.io';
 import { query } from '../config/database';
+import { getSettings } from './settingsService';
+import { finalizeDraft } from './draftService';
+import {
+  assignDraftSlot,
+  isStarterSlot,
+  type LeagueSettings,
+} from '../config/leagueSettings';
 
 // =============================================
 // Shared Types
@@ -83,9 +90,10 @@ export class DraftEngine {
   private readonly sessionId: string;
   private readonly io: Server;
   private timer: NodeJS.Timeout | null = null;
+  private cachedSettings: LeagueSettings | null = null;
 
   /** Seconds left on the clock — accessible to socketServer for new joiners. */
-  secondsRemaining = 90;
+  secondsRemaining = 0;
 
   constructor(sessionId: string, io: Server) {
     this.sessionId = sessionId;
@@ -94,6 +102,16 @@ export class DraftEngine {
 
   get room(): string {
     return `draft:${this.sessionId}`;
+  }
+
+  // ── Settings cache ──────────────────────────────────────────────────────
+
+  /** Get league settings, cached per engine instance (settings are locked during draft). */
+  private async getLeagueSettings(): Promise<LeagueSettings> {
+    if (this.cachedSettings) return this.cachedSettings;
+    const session = await this.getSession();
+    this.cachedSettings = await getSettings(session.league_id);
+    return this.cachedSettings;
   }
 
   // ── DB helpers ─────────────────────────────────────────────────────────
@@ -252,13 +270,29 @@ export class DraftEngine {
       ]
     );
 
-    // Persist to team roster
+    // Determine roster slot from league settings
+    const settings = await this.getLeagueSettings();
+    const { rows: [playerRow] } = await query(
+      'SELECT position FROM players WHERE id = $1',
+      [playerId]
+    );
+    const playerPosition = playerRow?.position as string || 'BN';
+
+    const { rows: filledRows } = await query(
+      'SELECT roster_slot FROM rosters WHERE team_id = $1 AND roster_slot IS NOT NULL',
+      [teamId]
+    );
+    const filledSlots = filledRows.map((r: { roster_slot: string }) => r.roster_slot);
+    const rosterSlot = assignDraftSlot(playerPosition, filledSlots, settings.roster);
+    const starter = isStarterSlot(rosterSlot);
+
+    // Persist to team roster with correct slot
     await query(
-      `INSERT INTO rosters (team_id, player_id, acquisition_type, acquisition_week, is_starter)
-       SELECT $1, $2, 'draft', $3, false
+      `INSERT INTO rosters (team_id, player_id, acquisition_type, acquisition_week, is_starter, roster_slot)
+       SELECT $1, $2, 'draft', $3, $4, $5
        WHERE  EXISTS (SELECT 1 FROM players WHERE id = $2)
        ON CONFLICT (team_id, player_id) DO NOTHING`,
-      [teamId, playerId, round]
+      [teamId, playerId, round, starter, rosterSlot]
     );
 
     // Advance the pick counter
@@ -311,6 +345,17 @@ export class DraftEngine {
     });
 
     if (isComplete) {
+      // Finalize the draft: transition league, generate schedule, set waiver priority
+      try {
+        const settings = await this.getLeagueSettings();
+        await finalizeDraft(
+          session.league_id,
+          session.draft_order,
+          settings.season.regular_season_weeks,
+        );
+      } catch (err) {
+        console.error('[DraftEngine] finalizeDraft failed:', err);
+      }
       this.io.to(this.room).emit('draft:complete', { session_id: this.sessionId });
       console.log(`[DraftEngine] Session ${this.sessionId} complete`);
     } else {
@@ -341,6 +386,7 @@ export class DraftEngine {
        WHERE  p.id NOT IN (
          SELECT player_id FROM draft_picks WHERE session_id = $1
        )
+       AND p.position IN ('QB','RB','WR','TE','K','DEF')
        ORDER  BY COALESCE(ps.best_ppr, 0) DESC, p.full_name
        LIMIT  1`,
       [this.sessionId]
@@ -361,15 +407,28 @@ export class DraftEngine {
 
   private startTimer(): void {
     this.stopTimer();
-    this.timer = setInterval(() => {
+    this.timer = setInterval(async () => {
       this.secondsRemaining = Math.max(0, this.secondsRemaining - 1);
       this.io.to(this.room).emit('draft:tick', { seconds_remaining: this.secondsRemaining });
 
       if (this.secondsRemaining <= 0) {
         this.stopTimer();
-        this.autoPick().catch((err) => {
-          console.error('[DraftEngine] Auto-pick on timer expiry failed:', err);
-        });
+        // Respect auto_pick_on_timeout setting
+        try {
+          const settings = await this.getLeagueSettings();
+          if (settings.draft.auto_pick_on_timeout) {
+            this.autoPick().catch((err) => {
+              console.error('[DraftEngine] Auto-pick on timer expiry failed:', err);
+            });
+          }
+          // If auto_pick_on_timeout is false, timer shows 0 but no pick is made.
+          // Commissioner can pause/resume, or the user can manually pick.
+        } catch (err) {
+          // Fallback: auto-pick if settings fetch fails
+          this.autoPick().catch((err2) => {
+            console.error('[DraftEngine] Auto-pick fallback failed:', err2);
+          });
+        }
       }
     }, 1000);
   }

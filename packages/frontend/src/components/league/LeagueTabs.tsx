@@ -10,6 +10,7 @@ interface LeagueTabsProps {
 
 const tabs = [
   { key: '',           label: 'Overview' },
+  { key: '/league',    label: 'League' },
   { key: '/teams',     label: 'Teams' },
   { key: '/draft',     label: 'Draft' },
   { key: '/standings', label: 'Standings' },
@@ -33,7 +34,7 @@ export default function LeagueTabs({ leagueId, isCommissioner }: LeagueTabsProps
         const href = `${base}${tab.key}`;
         const isActive = tab.key === ''
           ? pathname === base
-          : pathname === href;
+          : pathname === href || pathname.startsWith(href + '/');
 
         return (
           <Link

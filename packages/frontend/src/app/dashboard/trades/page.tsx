@@ -423,6 +423,7 @@ export default function TradesPage() {
   const activeLeague = useLeagueStore((s) => s.activeLeague);
   const [tab, setTab] = useState<Tab>('inbox');
   const [successMsg, setSuccessMsg] = useState('');
+  const [actionErr, setActionErr] = useState('');
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionNote, setActionNote] = useState<Record<string, string>>({});
 
@@ -450,11 +451,12 @@ export default function TradesPage() {
 
   async function handleRespond(tradeId: string, action: 'accept' | 'reject') {
     setActionBusy(tradeId);
+    setActionErr('');
     try {
       await tradesApi.respond(tradeId, action, actionNote[tradeId]);
       refreshAll();
     } catch (err) {
-      alert((err as Error).message);
+      setActionErr((err as Error).message);
     } finally {
       setActionBusy(null);
     }
@@ -462,11 +464,12 @@ export default function TradesPage() {
 
   async function handleApprove(tradeId: string, action: 'approve' | 'veto') {
     setActionBusy(tradeId);
+    setActionErr('');
     try {
       await tradesApi.approve(tradeId, action, actionNote[tradeId]);
       refreshAll();
     } catch (err) {
-      alert((err as Error).message);
+      setActionErr((err as Error).message);
     } finally {
       setActionBusy(null);
     }
@@ -523,6 +526,13 @@ export default function TradesPage() {
             </button>
           ))}
         </div>
+
+        {actionErr && (
+          <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm flex items-center justify-between">
+            {actionErr}
+            <button onClick={() => setActionErr('')} className="text-red-400/60 hover:text-red-400 ml-4">✕</button>
+          </div>
+        )}
 
         {successMsg && (
           <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-3 text-green-400 text-sm flex items-center justify-between">

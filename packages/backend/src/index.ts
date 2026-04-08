@@ -112,6 +112,7 @@ try {
   const invitesRouter = require('./routes/invites').default;
   const adminRouter = require('./routes/admin').default;
   const waiversRouter = require('./routes/waivers').default;
+  const commissionerRouter = require('./routes/commissioner').default;
   const { errorHandler, notFound } = require('./middleware/errorHandler');
 
   app.use('/api/users', authLimiter, usersRouter);
@@ -125,6 +126,7 @@ try {
   app.use('/api', invitesRouter);
   app.use('/api/admin', adminRouter);
   app.use('/api/leagues', waiversRouter);
+  app.use('/api/leagues/:id/commissioner', commissionerRouter);
 
   app.use(notFound);
   app.use(errorHandler);
